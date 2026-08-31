@@ -93,6 +93,12 @@ enum class ProviderPayoutState {
     FAILED
 }
 
+enum class PayoutSettlementMode {
+    DISABLED,
+    SANDBOX,
+    LIVE
+}
+
 data class ProviderSubmitResult(
     val accepted: Boolean,
     val providerBatchId: String? = null,
@@ -108,6 +114,8 @@ data class ProviderStatusResult(
 interface PayoutGateway {
     val providerName: String
     val enabled: Boolean
+    val settlementMode: PayoutSettlementMode
+        get() = PayoutSettlementMode.LIVE
     fun submit(requestId: String, currency: RewardCurrency, amountCents: Long): ProviderSubmitResult
     fun status(providerBatchId: String): ProviderStatusResult
 }
@@ -115,6 +123,7 @@ interface PayoutGateway {
 object DisabledPayoutGateway : PayoutGateway {
     override val providerName: String = "paypal"
     override val enabled: Boolean = false
+    override val settlementMode: PayoutSettlementMode = PayoutSettlementMode.DISABLED
     override fun submit(requestId: String, currency: RewardCurrency, amountCents: Long) =
         ProviderSubmitResult(false, failureCode = "PROVIDER_DISABLED")
     override fun status(providerBatchId: String) =
@@ -124,6 +133,7 @@ object DisabledPayoutGateway : PayoutGateway {
 enum class WithdrawalResultCode {
     SUBMITTED,
     PROCESSING,
+    SANDBOX_VERIFIED,
     PAID,
     FAILED,
     NO_AVAILABLE,
@@ -239,15 +249,27 @@ class WithdrawalService(
             entry.amountCents,
             entry.providerBatchId
         )
-        PayoutState.FAILED -> result(
-            WithdrawalResultCode.FAILED,
-            entry.installationId,
-            entry.currency,
-            entry.requestId,
-            entry.amountCents,
-            entry.providerBatchId,
-            entry.failureCode
-        )
+        PayoutState.FAILED -> if (entry.failureCode == SANDBOX_VERIFIED_CODE) {
+            result(
+                WithdrawalResultCode.SANDBOX_VERIFIED,
+                entry.installationId,
+                entry.currency,
+                entry.requestId,
+                entry.amountCents,
+                entry.providerBatchId,
+                entry.failureCode
+            )
+        } else {
+            result(
+                WithdrawalResultCode.FAILED,
+                entry.installationId,
+                entry.currency,
+                entry.requestId,
+                entry.amountCents,
+                entry.providerBatchId,
+                entry.failureCode
+            )
+        }
     }
 
     private fun submit(entry: PayoutLedgerEntry, nowEpochMs: Long): WithdrawalResult {
@@ -322,7 +344,30 @@ class WithdrawalService(
                 provider.failureCode
             )
             ProviderPayoutState.SUCCESS -> {
-                if (!markRewardsPaid(entry.requestId, nowEpochMs) ||
+                if (gateway.settlementMode == PayoutSettlementMode.SANDBOX) {
+                    releaseRewards(entry.requestId, nowEpochMs)
+                    if (!persistence.updatePayout(
+                            entry.requestId,
+                            PayoutState.SUBMITTED,
+                            PayoutState.FAILED,
+                            providerBatchId,
+                            SANDBOX_VERIFIED_CODE,
+                            nowEpochMs
+                        )
+                    ) {
+                        result(WithdrawalResultCode.STORAGE_FAILURE, entry.installationId, entry.currency)
+                    } else {
+                        result(
+                            WithdrawalResultCode.SANDBOX_VERIFIED,
+                            entry.installationId,
+                            entry.currency,
+                            entry.requestId,
+                            entry.amountCents,
+                            providerBatchId,
+                            SANDBOX_VERIFIED_CODE
+                        )
+                    }
+                } else if (!markRewardsPaid(entry.requestId, nowEpochMs) ||
                     !persistence.updatePayout(
                         entry.requestId,
                         PayoutState.SUBMITTED,
@@ -432,5 +477,6 @@ class WithdrawalService(
 
     private companion object {
         const val REQUEST_MAX_AGE_MS = 10 * 60 * 1000L
+        const val SANDBOX_VERIFIED_CODE = "SANDBOX_VERIFIED_NO_SETTLEMENT"
     }
 }
