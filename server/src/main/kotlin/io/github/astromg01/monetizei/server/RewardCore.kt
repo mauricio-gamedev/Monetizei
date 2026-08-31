@@ -5,7 +5,9 @@ import java.util.UUID
 enum class RewardState {
     PENDING,
     APPROVED,
-    AVAILABLE
+    AVAILABLE,
+    PAYOUT_PENDING,
+    PAID
 }
 
 enum class RewardCurrency {
@@ -195,11 +197,13 @@ class RewardService(
                         RewardState.PENDING -> brlPending += reward.amountCents
                         RewardState.APPROVED -> brlApproved += reward.amountCents
                         RewardState.AVAILABLE -> brlAvailable += reward.amountCents
+                        RewardState.PAYOUT_PENDING, RewardState.PAID -> Unit
                     }
                     RewardCurrency.USD -> when (reward.state) {
                         RewardState.PENDING -> usdPending += reward.amountCents
                         RewardState.APPROVED -> usdApproved += reward.amountCents
                         RewardState.AVAILABLE -> usdAvailable += reward.amountCents
+                        RewardState.PAYOUT_PENDING, RewardState.PAID -> Unit
                     }
                 }
             }
@@ -217,6 +221,18 @@ class RewardService(
     @Synchronized
     fun makeAvailable(rewardId: String, nowEpochMs: Long): Boolean =
         transition(rewardId, RewardState.APPROVED, RewardState.AVAILABLE, nowEpochMs)
+
+    @Synchronized
+    fun reserveForPayout(rewardId: String, nowEpochMs: Long): Boolean =
+        transition(rewardId, RewardState.AVAILABLE, RewardState.PAYOUT_PENDING, nowEpochMs)
+
+    @Synchronized
+    fun markPaid(rewardId: String, nowEpochMs: Long): Boolean =
+        transition(rewardId, RewardState.PAYOUT_PENDING, RewardState.PAID, nowEpochMs)
+
+    @Synchronized
+    fun releasePayout(rewardId: String, nowEpochMs: Long): Boolean =
+        transition(rewardId, RewardState.PAYOUT_PENDING, RewardState.AVAILABLE, nowEpochMs)
 
     @Synchronized
     fun snapshot(): List<RewardLedgerEntry> = entries.toList()
