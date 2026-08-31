@@ -133,7 +133,6 @@ object DisabledPayoutGateway : PayoutGateway {
 enum class WithdrawalResultCode {
     SUBMITTED,
     PROCESSING,
-    SANDBOX_VERIFIED,
     PAID,
     FAILED,
     NO_AVAILABLE,
@@ -249,27 +248,15 @@ class WithdrawalService(
             entry.amountCents,
             entry.providerBatchId
         )
-        PayoutState.FAILED -> if (entry.failureCode == SANDBOX_VERIFIED_CODE) {
-            result(
-                WithdrawalResultCode.SANDBOX_VERIFIED,
-                entry.installationId,
-                entry.currency,
-                entry.requestId,
-                entry.amountCents,
-                entry.providerBatchId,
-                entry.failureCode
-            )
-        } else {
-            result(
-                WithdrawalResultCode.FAILED,
-                entry.installationId,
-                entry.currency,
-                entry.requestId,
-                entry.amountCents,
-                entry.providerBatchId,
-                entry.failureCode
-            )
-        }
+        PayoutState.FAILED -> result(
+            WithdrawalResultCode.FAILED,
+            entry.installationId,
+            entry.currency,
+            entry.requestId,
+            entry.amountCents,
+            entry.providerBatchId,
+            entry.failureCode
+        )
     }
 
     private fun submit(entry: PayoutLedgerEntry, nowEpochMs: Long): WithdrawalResult {
@@ -358,7 +345,7 @@ class WithdrawalService(
                         result(WithdrawalResultCode.STORAGE_FAILURE, entry.installationId, entry.currency)
                     } else {
                         result(
-                            WithdrawalResultCode.SANDBOX_VERIFIED,
+                            WithdrawalResultCode.FAILED,
                             entry.installationId,
                             entry.currency,
                             entry.requestId,
