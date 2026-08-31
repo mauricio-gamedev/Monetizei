@@ -2,6 +2,7 @@ package io.github.astromg01.monetizei.protocol
 
 import java.security.MessageDigest
 import java.util.Base64
+import kotlinx.serialization.Serializable
 
 object SessionProtocol {
     const val VERSION = 1
@@ -10,6 +11,7 @@ object SessionProtocol {
     const val MAX_SESSION_SCORE = 450
 }
 
+@Serializable
 data class InstallationRegistration(
     val protocolVersion: Int,
     val installationId: String,
@@ -20,6 +22,7 @@ data class InstallationRegistration(
     val createdAtEpochMs: Long
 )
 
+@Serializable
 data class SessionPayload(
     val protocolVersion: Int,
     val installationId: String,
@@ -32,6 +35,7 @@ data class SessionPayload(
     val appVersion: String
 )
 
+@Serializable
 data class SignedSessionEnvelope(
     val payload: SessionPayload,
     val keyId: String,
