@@ -20,7 +20,7 @@ The APK can grant only non-cash progression. Withdrawable money must be created 
 - JDK 17
 - Gradle 9.5.0
 - Android Gradle Plugin 9.3.0
-- Kotlin Android plugin 2.3.21
+- AGP 9 built-in Kotlin support
 - Android SDK / compileSdk 37
 
 ## Next milestone
