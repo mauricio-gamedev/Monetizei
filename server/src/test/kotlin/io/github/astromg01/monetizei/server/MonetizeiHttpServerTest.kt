@@ -112,6 +112,61 @@ class MonetizeiHttpServerTest {
         assertEquals(0L, wallet.availableCents)
     }
 
+    @Test
+    fun adminAvailabilityRequiresTokenAndMakesOnlyOneApprovedRewardAvailable() {
+        server.close()
+        val installationId = "test-installation"
+        val rewardService = RewardService(
+            initialEntries = listOf(
+                RewardLedgerEntry(
+                    rewardId = "approved-1",
+                    installationId = installationId,
+                    gameplayLedgerId = "ledger-a1",
+                    sessionId = "session-a1",
+                    amountCents = 1,
+                    currency = RewardCurrency.BRL,
+                    state = RewardState.APPROVED,
+                    policyCode = "test",
+                    createdAtEpochMs = 1_000L,
+                    updatedAtEpochMs = 1_500L
+                ),
+                RewardLedgerEntry(
+                    rewardId = "approved-2",
+                    installationId = installationId,
+                    gameplayLedgerId = "ledger-a2",
+                    sessionId = "session-a2",
+                    amountCents = 1,
+                    currency = RewardCurrency.BRL,
+                    state = RewardState.APPROVED,
+                    policyCode = "test",
+                    createdAtEpochMs = 2_000L,
+                    updatedAtEpochMs = 2_500L
+                )
+            )
+        )
+        server = MonetizeiHttpServer(
+            bindAddress = InetSocketAddress("127.0.0.1", 0),
+            rewardService = rewardService,
+            adminToken = "test-admin-token"
+        )
+        server.start()
+
+        assertEquals(401, post("/v1/admin/rewards/make-next-available", "{}").first)
+        val available = post(
+            "/v1/admin/rewards/make-next-available",
+            "{}",
+            bearerToken = "test-admin-token"
+        )
+        assertEquals(200, available.first)
+        assertTrue(available.second.contains("\"rewardId\":\"approved-1\""))
+        assertTrue(available.second.contains("\"state\":\"AVAILABLE\""))
+
+        val wallet = rewardService.wallet(installationId).brl
+        assertEquals(0L, wallet.pendingCents)
+        assertEquals(1L, wallet.approvedCents)
+        assertEquals(1L, wallet.availableCents)
+    }
+
     private fun post(path: String, body: String, bearerToken: String? = null): Pair<Int, String> {
         val connection = (URL("http://127.0.0.1:${server.port}$path").openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
