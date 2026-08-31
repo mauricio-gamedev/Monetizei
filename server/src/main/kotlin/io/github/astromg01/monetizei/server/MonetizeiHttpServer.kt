@@ -13,13 +13,15 @@ class MonetizeiHttpServer(
     bindAddress: InetSocketAddress = InetSocketAddress("127.0.0.1", 0),
     private val service: SessionIngestService = SessionIngestService(),
     private val rewardService: RewardService? = null,
-    private val adminToken: String? = null
+    private val adminToken: String? = null,
+    private val withdrawalService: WithdrawalService? = null
 ) : AutoCloseable {
     private val server = HttpServer.create(bindAddress, 0).apply {
         executor = Executors.newFixedThreadPool(4)
         createContext("/health") { exchange -> health(exchange) }
         createContext("/v1/installations") { exchange -> register(exchange) }
         createContext("/v1/sessions") { exchange -> submit(exchange) }
+        createContext("/v1/withdrawals") { exchange -> withdraw(exchange) }
         createContext("/v1/admin/rewards/approve-next") { exchange -> approveNextReward(exchange) }
         createContext("/v1/admin/rewards/make-next-available") { exchange -> makeNextRewardAvailable(exchange) }
     }
@@ -64,11 +66,10 @@ class MonetizeiHttpServer(
         val result = service.submit(envelope, System.currentTimeMillis())
         if (result.accepted) {
             val reward = result.rewardDecision ?: RewardDecision(RewardDecisionCode.DISABLED)
-            val wallet = reward.wallet
             return respond(
                 exchange,
                 202,
-                successfulSessionJson(result.ledgerId.orEmpty(), reward, wallet)
+                successfulSessionJson(result.ledgerId.orEmpty(), reward, reward.wallet)
             )
         }
 
@@ -83,6 +84,30 @@ class MonetizeiHttpServer(
             IngestRejectReason.STORAGE_FAILURE -> 503
         }
         respond(exchange, status, "{\"accepted\":false,\"reason\":\"$reason\"}")
+    }
+
+    private fun withdraw(exchange: HttpExchange) {
+        if (exchange.requestMethod != "POST") {
+            return respond(exchange, 405, "{\"error\":\"method_not_allowed\"}")
+        }
+        val withdrawals = withdrawalService
+            ?: return respond(exchange, 503, "{\"result\":\"PROVIDER_DISABLED\"}")
+        val envelope = runCatching { ProtocolJson.decodeWithdrawal(readBody(exchange)) }.getOrNull()
+            ?: return respond(exchange, 400, "{\"result\":\"INVALID\"}")
+        val result = withdrawals.request(envelope, System.currentTimeMillis())
+        val status = when (result.code) {
+            WithdrawalResultCode.SUBMITTED, WithdrawalResultCode.PROCESSING -> 202
+            WithdrawalResultCode.PAID -> 200
+            WithdrawalResultCode.NO_AVAILABLE -> 409
+            WithdrawalResultCode.PROVIDER_DISABLED -> 503
+            WithdrawalResultCode.INVALID -> 400
+            WithdrawalResultCode.UNKNOWN_INSTALLATION -> 404
+            WithdrawalResultCode.KEY_MISMATCH -> 409
+            WithdrawalResultCode.INVALID_SIGNATURE -> 401
+            WithdrawalResultCode.STORAGE_FAILURE -> 503
+            WithdrawalResultCode.FAILED -> 502
+        }
+        respond(exchange, status, withdrawalJson(result))
     }
 
     private fun approveNextReward(exchange: HttpExchange) {
@@ -164,26 +189,37 @@ class MonetizeiHttpServer(
         ledgerId: String,
         reward: RewardDecision,
         wallet: RewardWalletSnapshot
-    ): String {
+    ): String = "{" +
+        "\"accepted\":true," +
+        "\"ledgerId\":\"$ledgerId\"," +
+        "\"reward\":{" +
+            "\"decision\":\"${reward.code}\"," +
+            "\"amountCents\":${reward.amountCents}," +
+            "\"currency\":\"${reward.currency}\"" +
+        "}," +
+        "\"wallet\":${walletJson(wallet)}" +
+    "}"
+
+    private fun withdrawalJson(result: WithdrawalResult): String = "{" +
+        "\"result\":\"${result.code}\"," +
+        "\"requestId\":${jsonNullable(result.requestId)}," +
+        "\"amountCents\":${result.amountCents}," +
+        "\"currency\":\"${result.currency}\"," +
+        "\"providerBatchId\":${jsonNullable(result.providerBatchId)}," +
+        "\"failureCode\":${jsonNullable(result.failureCode)}," +
+        "\"wallet\":${walletJson(result.wallet)}" +
+    "}"
+
+    private fun walletJson(wallet: RewardWalletSnapshot): String {
         val brl = wallet.brl
         val usd = wallet.usd
         return "{" +
-            "\"accepted\":true," +
-            "\"ledgerId\":\"$ledgerId\"," +
-            "\"reward\":{" +
-                "\"decision\":\"${reward.code}\"," +
-                "\"amountCents\":${reward.amountCents}," +
-                "\"currency\":\"${reward.currency}\"" +
-            "}," +
-            "\"wallet\":{" +
-                // v0.5 BRL-only clients keep reading these legacy aliases.
-                "\"pendingCents\":${brl.pendingCents}," +
-                "\"approvedCents\":${brl.approvedCents}," +
-                "\"availableCents\":${brl.availableCents}," +
-                "\"balances\":{" +
-                    "\"BRL\":${balanceJson(brl)}," +
-                    "\"USD\":${balanceJson(usd)}" +
-                "}" +
+            "\"pendingCents\":${brl.pendingCents}," +
+            "\"approvedCents\":${brl.approvedCents}," +
+            "\"availableCents\":${brl.availableCents}," +
+            "\"balances\":{" +
+                "\"BRL\":${balanceJson(brl)}," +
+                "\"USD\":${balanceJson(usd)}" +
             "}" +
         "}"
     }
@@ -192,6 +228,15 @@ class MonetizeiHttpServer(
         "{\"pendingCents\":${balance.pendingCents}," +
             "\"approvedCents\":${balance.approvedCents}," +
             "\"availableCents\":${balance.availableCents}}"
+
+    private fun jsonNullable(value: String?): String =
+        value?.let { "\"${jsonEscape(it)}\"" } ?: "null"
+
+    private fun jsonEscape(value: String): String = value
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
 
     private fun readBody(exchange: HttpExchange): String =
         exchange.requestBody.bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
@@ -222,11 +267,38 @@ fun main() {
     val rewardService = RewardService(persistence = persistence, policy = rewardPolicy)
     val service = SessionIngestService(persistence = persistence, rewardService = rewardService)
     val adminToken = System.getenv("MONETIZEI_ADMIN_TOKEN")?.trim()?.takeIf { it.isNotBlank() }
+
+    val payoutsExplicitlyEnabled = envBoolean("MONETIZEI_PAYPAL_PAYOUTS_ENABLED", false)
+    val paypalSandbox = System.getenv("MONETIZEI_PAYPAL_MODE")
+        ?.trim()
+        ?.lowercase()
+        ?.let { it != "live" }
+        ?: true
+    val payoutGateway: PayoutGateway = if (payoutsExplicitlyEnabled) {
+        PayPalPayoutGateway(
+            clientId = System.getenv("MONETIZEI_PAYPAL_CLIENT_ID").orEmpty(),
+            clientSecret = System.getenv("MONETIZEI_PAYPAL_CLIENT_SECRET").orEmpty(),
+            receiverEmail = System.getenv("MONETIZEI_PAYPAL_RECEIVER_EMAIL").orEmpty(),
+            sandbox = paypalSandbox
+        )
+    } else {
+        DisabledPayoutGateway
+    }
+    val withdrawalService = WithdrawalService(
+        rewardService = rewardService,
+        persistence = persistence,
+        registrationLookup = { installationId ->
+            persistence.loadRegistrations().firstOrNull { it.installationId == installationId }
+        },
+        gateway = payoutGateway
+    )
+
     val server = MonetizeiHttpServer(
         InetSocketAddress("0.0.0.0", port),
         service,
         rewardService,
-        adminToken
+        adminToken,
+        withdrawalService
     )
 
     Runtime.getRuntime().addShutdownHook(
@@ -239,7 +311,8 @@ fun main() {
     println(
         "Monetizei backend listening on 0.0.0.0:$port with persistent storage; " +
             "rewardPolicyEnabled=${rewardPolicy.enabled}; rewardCurrency=${rewardPolicy.currency}; " +
-            "adminApprovalEnabled=${adminToken != null}"
+            "adminApprovalEnabled=${adminToken != null}; payoutsEnabled=${payoutGateway.enabled}; " +
+            "paypalMode=${if (paypalSandbox) "sandbox" else "live"}"
     )
 }
 
@@ -248,6 +321,9 @@ private fun envLong(name: String, default: Long, min: Long, max: Long): Long =
 
 private fun envInt(name: String, default: Int, min: Int, max: Int): Int =
     System.getenv(name)?.toIntOrNull()?.coerceIn(min, max) ?: default
+
+private fun envBoolean(name: String, default: Boolean): Boolean =
+    System.getenv(name)?.trim()?.lowercase()?.let { it in setOf("1", "true", "yes", "on") } ?: default
 
 private fun envRewardCurrency(name: String, default: RewardCurrency): RewardCurrency =
     System.getenv(name)
