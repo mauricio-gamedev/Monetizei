@@ -22,4 +22,10 @@ object ProtocolJson {
 
     fun decodeSession(value: String): SignedSessionEnvelope =
         json.decodeFromString(value)
+
+    fun encodeWithdrawal(value: SignedWithdrawalEnvelope): String =
+        json.encodeToString(value)
+
+    fun decodeWithdrawal(value: String): SignedWithdrawalEnvelope =
+        json.decodeFromString(value)
 }
