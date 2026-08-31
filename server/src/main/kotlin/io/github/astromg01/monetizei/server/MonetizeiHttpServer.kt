@@ -6,17 +6,21 @@ import io.github.astromg01.monetizei.protocol.ProtocolJson
 import java.net.InetSocketAddress
 import java.nio.charset.StandardCharsets
 import java.nio.file.Paths
+import java.security.MessageDigest
 import java.util.concurrent.Executors
 
 class MonetizeiHttpServer(
     bindAddress: InetSocketAddress = InetSocketAddress("127.0.0.1", 0),
-    private val service: SessionIngestService = SessionIngestService()
+    private val service: SessionIngestService = SessionIngestService(),
+    private val rewardService: RewardService? = null,
+    private val adminToken: String? = null
 ) : AutoCloseable {
     private val server = HttpServer.create(bindAddress, 0).apply {
         executor = Executors.newFixedThreadPool(4)
         createContext("/health") { exchange -> health(exchange) }
         createContext("/v1/installations") { exchange -> register(exchange) }
         createContext("/v1/sessions") { exchange -> submit(exchange) }
+        createContext("/v1/admin/rewards/approve-next") { exchange -> approveNextReward(exchange) }
     }
 
     val port: Int get() = server.address.port
@@ -80,6 +84,49 @@ class MonetizeiHttpServer(
         respond(exchange, status, "{\"accepted\":false,\"reason\":\"$reason\"}")
     }
 
+    private fun approveNextReward(exchange: HttpExchange) {
+        if (exchange.requestMethod != "POST") {
+            return respond(exchange, 405, "{\"error\":\"method_not_allowed\"}")
+        }
+
+        val rewards = rewardService
+        val expectedToken = adminToken?.takeIf { it.isNotBlank() }
+        if (rewards == null || expectedToken == null) {
+            return respond(exchange, 404, "{\"error\":\"admin_disabled\"}")
+        }
+        if (!authorized(exchange, expectedToken)) {
+            return respond(exchange, 401, "{\"error\":\"unauthorized\"}")
+        }
+
+        val pending = rewards.snapshot()
+            .asSequence()
+            .filter { it.state == RewardState.PENDING }
+            .minWithOrNull(compareBy<RewardLedgerEntry> { it.createdAtEpochMs }.thenBy { it.rewardId })
+            ?: return respond(exchange, 404, "{\"result\":\"NO_PENDING\"}")
+
+        if (!rewards.approve(pending.rewardId, System.currentTimeMillis())) {
+            return respond(exchange, 503, "{\"result\":\"TRANSITION_FAILED\"}")
+        }
+
+        val approved = rewards.snapshot().first { it.rewardId == pending.rewardId }
+        respond(
+            exchange,
+            200,
+            "{\"result\":\"APPROVED\",\"rewardId\":\"${approved.rewardId}\",\"amountCents\":${approved.amountCents},\"currency\":\"${approved.currency}\",\"state\":\"${approved.state}\"}"
+        )
+    }
+
+    private fun authorized(exchange: HttpExchange, expectedToken: String): Boolean {
+        val header = exchange.requestHeaders.getFirst("Authorization") ?: return false
+        val prefix = "Bearer "
+        if (!header.startsWith(prefix)) return false
+        val supplied = header.substring(prefix.length)
+        return MessageDigest.isEqual(
+            supplied.toByteArray(StandardCharsets.UTF_8),
+            expectedToken.toByteArray(StandardCharsets.UTF_8)
+        )
+    }
+
     private fun successfulSessionJson(
         ledgerId: String,
         reward: RewardDecision,
@@ -141,7 +188,13 @@ fun main() {
     )
     val rewardService = RewardService(persistence = persistence, policy = rewardPolicy)
     val service = SessionIngestService(persistence = persistence, rewardService = rewardService)
-    val server = MonetizeiHttpServer(InetSocketAddress("0.0.0.0", port), service)
+    val adminToken = System.getenv("MONETIZEI_ADMIN_TOKEN")?.trim()?.takeIf { it.isNotBlank() }
+    val server = MonetizeiHttpServer(
+        InetSocketAddress("0.0.0.0", port),
+        service,
+        rewardService,
+        adminToken
+    )
 
     Runtime.getRuntime().addShutdownHook(
         Thread {
@@ -152,7 +205,8 @@ fun main() {
     server.start()
     println(
         "Monetizei backend listening on 0.0.0.0:$port with persistent storage; " +
-            "rewardPolicyEnabled=${rewardPolicy.enabled}; rewardCurrency=${rewardPolicy.currency}"
+            "rewardPolicyEnabled=${rewardPolicy.enabled}; rewardCurrency=${rewardPolicy.currency}; " +
+            "adminApprovalEnabled=${adminToken != null}"
     )
 }
 
