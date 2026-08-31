@@ -57,6 +57,7 @@ class SqliteServerPersistence(dbPath: Path) : SessionPersistence, RewardPersiste
                     gameplay_ledger_id TEXT NOT NULL UNIQUE,
                     session_id TEXT NOT NULL UNIQUE,
                     amount_cents INTEGER NOT NULL CHECK(amount_cents > 0),
+                    currency TEXT NOT NULL DEFAULT 'BRL' CHECK(currency IN ('BRL','USD')),
                     state TEXT NOT NULL CHECK(state IN ('PENDING','APPROVED','AVAILABLE')),
                     policy_code TEXT NOT NULL,
                     created_at_epoch_ms INTEGER NOT NULL,
@@ -75,6 +76,31 @@ class SqliteServerPersistence(dbPath: Path) : SessionPersistence, RewardPersiste
             statement.execute(
                 "CREATE INDEX IF NOT EXISTS idx_reward_created ON reward_ledger(created_at_epoch_ms)"
             )
+        }
+
+        migrateRewardCurrencyColumn()
+        connection.createStatement().use { statement ->
+            statement.execute(
+                "CREATE INDEX IF NOT EXISTS idx_reward_installation_currency_state ON reward_ledger(installation_id, currency, state)"
+            )
+        }
+    }
+
+    private fun migrateRewardCurrencyColumn() {
+        val columns = mutableSetOf<String>()
+        connection.createStatement().use { statement ->
+            statement.executeQuery("PRAGMA table_info(reward_ledger)").use { rows ->
+                while (rows.next()) {
+                    columns += rows.getString("name")
+                }
+            }
+        }
+        if ("currency" !in columns) {
+            connection.createStatement().use { statement ->
+                statement.execute(
+                    "ALTER TABLE reward_ledger ADD COLUMN currency TEXT NOT NULL DEFAULT 'BRL' CHECK(currency IN ('BRL','USD'))"
+                )
+            }
         }
     }
 
@@ -144,7 +170,7 @@ class SqliteServerPersistence(dbPath: Path) : SessionPersistence, RewardPersiste
         connection.prepareStatement(
             """
             SELECT reward_id, installation_id, gameplay_ledger_id, session_id,
-                   amount_cents, state, policy_code, created_at_epoch_ms, updated_at_epoch_ms
+                   amount_cents, currency, state, policy_code, created_at_epoch_ms, updated_at_epoch_ms
             FROM reward_ledger
             ORDER BY created_at_epoch_ms ASC, rowid ASC
             """.trimIndent()
@@ -157,6 +183,7 @@ class SqliteServerPersistence(dbPath: Path) : SessionPersistence, RewardPersiste
                         gameplayLedgerId = rows.getString("gameplay_ledger_id"),
                         sessionId = rows.getString("session_id"),
                         amountCents = rows.getLong("amount_cents"),
+                        currency = RewardCurrency.valueOf(rows.getString("currency")),
                         state = RewardState.valueOf(rows.getString("state")),
                         policyCode = rows.getString("policy_code"),
                         createdAtEpochMs = rows.getLong("created_at_epoch_ms"),
@@ -220,8 +247,8 @@ class SqliteServerPersistence(dbPath: Path) : SessionPersistence, RewardPersiste
             """
             INSERT INTO reward_ledger(
                 reward_id, installation_id, gameplay_ledger_id, session_id,
-                amount_cents, state, policy_code, created_at_epoch_ms, updated_at_epoch_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                amount_cents, currency, state, policy_code, created_at_epoch_ms, updated_at_epoch_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """.trimIndent()
         ).use { statement ->
             statement.setString(1, entry.rewardId)
@@ -229,10 +256,11 @@ class SqliteServerPersistence(dbPath: Path) : SessionPersistence, RewardPersiste
             statement.setString(3, entry.gameplayLedgerId)
             statement.setString(4, entry.sessionId)
             statement.setLong(5, entry.amountCents)
-            statement.setString(6, entry.state.name)
-            statement.setString(7, entry.policyCode)
-            statement.setLong(8, entry.createdAtEpochMs)
-            statement.setLong(9, entry.updatedAtEpochMs)
+            statement.setString(6, entry.currency.name)
+            statement.setString(7, entry.state.name)
+            statement.setString(8, entry.policyCode)
+            statement.setLong(9, entry.createdAtEpochMs)
+            statement.setLong(10, entry.updatedAtEpochMs)
             statement.executeUpdate() == 1
         }
     }.getOrDefault(false)

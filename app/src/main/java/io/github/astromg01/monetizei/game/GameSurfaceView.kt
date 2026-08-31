@@ -9,7 +9,6 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import io.github.astromg01.monetizei.data.RewardRepository
 import io.github.astromg01.monetizei.domain.RewardRules
-import io.github.astromg01.monetizei.telemetry.RemoteRewardWallet
 import io.github.astromg01.monetizei.telemetry.TelemetryRecorder
 import kotlin.math.hypot
 import kotlin.random.Random
@@ -29,6 +28,10 @@ class GameSurfaceView(
     private val secondaryTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0xFFB5BEC8.toInt()
         textSize = 30f
+    }
+    private val walletTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFFB5BEC8.toInt()
+        textSize = 26f
     }
 
     @Volatile
@@ -135,32 +138,53 @@ class GameSurfaceView(
     private fun drawFinished(canvas: Canvas) {
         val wallet = rewardRepository.getWallet()
         val remote = telemetryRecorder?.rewardWallet()
-        canvas.drawText("Sessão concluída", 48f, height / 2f - 110f, textPaint)
-        canvas.drawText("Toque para jogar novamente", 48f, height / 2f - 45f, secondaryTextPaint)
-        canvas.drawText("Coins: ${wallet.softCoins} | XP: ${wallet.xp}", 48f, height / 2f + 10f, secondaryTextPaint)
+        val center = height / 2f
+
+        canvas.drawText("Sessão concluída", 48f, center - 165f, textPaint)
+        canvas.drawText("Toque para jogar novamente", 48f, center - 105f, secondaryTextPaint)
+        canvas.drawText("Coins: ${wallet.softCoins} | XP: ${wallet.xp}", 48f, center - 55f, secondaryTextPaint)
+
         if (remote == null) {
-            canvas.drawText("Carteira: aguardando servidor", 48f, height / 2f + 65f, secondaryTextPaint)
+            canvas.drawText("Carteira: aguardando servidor", 48f, center + 5f, secondaryTextPaint)
         } else {
             canvas.drawText(
-                "Pendente ${brl(remote.pendingCents)} | Aprovado ${brl(remote.approvedCents)}",
+                "BRL • P ${brl(remote.brl.pendingCents)} • A ${brl(remote.brl.approvedCents)}",
                 48f,
-                height / 2f + 65f,
-                secondaryTextPaint
+                center + 5f,
+                walletTextPaint
             )
             canvas.drawText(
-                "Disponível ${brl(remote.availableCents)}",
+                "BRL • Disponível ${brl(remote.brl.availableCents)}",
                 48f,
-                height / 2f + 120f,
-                secondaryTextPaint
+                center + 45f,
+                walletTextPaint
+            )
+            canvas.drawText(
+                "USD • P ${usd(remote.usd.pendingCents)} • A ${usd(remote.usd.approvedCents)}",
+                48f,
+                center + 85f,
+                walletTextPaint
+            )
+            canvas.drawText(
+                "USD • Disponível ${usd(remote.usd.availableCents)}",
+                48f,
+                center + 125f,
+                walletTextPaint
             )
         }
-        canvas.drawText(liveTelemetryStatus(), 48f, height / 2f + 175f, secondaryTextPaint)
+        canvas.drawText(liveTelemetryStatus(), 48f, center + 185f, secondaryTextPaint)
     }
 
     private fun brl(cents: Long): String {
         val reais = cents / 100
         val centavos = cents % 100
         return "R$ $reais,${centavos.toString().padStart(2, '0')}"
+    }
+
+    private fun usd(cents: Long): String {
+        val dollars = cents / 100
+        val centsPart = cents % 100
+        return "US$ $dollars.${centsPart.toString().padStart(2, '0')}"
     }
 
     private fun liveTelemetryStatus(): String {

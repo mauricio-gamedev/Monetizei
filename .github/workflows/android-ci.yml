@@ -17,6 +17,13 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "9.5.0"
+      - name: Reject committed signing keys
+        shell: bash
+        run: |
+          if git ls-files '*.jks' '*.keystore' | grep -q .; then
+            echo "Signing keystores must never be committed to the repository."
+            exit 1
+          fi
       - name: Unit, HTTP and persistence tests
         run: gradle :protocol:test :server:test :app:testDebugUnitTest --stacktrace
       - name: Build backend distribution
@@ -30,3 +37,46 @@ jobs:
         with:
           name: monetizei-debug
           path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Prepare stable update signing
+        id: stable_signing
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          MONETIZEI_KEYSTORE_BASE64: ${{ secrets.MONETIZEI_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$MONETIZEI_KEYSTORE_BASE64" ]; then
+            echo "Stable update signing is not configured yet."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p "$RUNNER_TEMP/monetizei-signing"
+          KEYSTORE_PATH="$RUNNER_TEMP/monetizei-signing/monetizei-update.jks"
+          printf '%s' "$MONETIZEI_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+          chmod 600 "$KEYSTORE_PATH"
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+          echo "keystore_path=$KEYSTORE_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Build stable signed update APK
+        if: steps.stable_signing.outputs.configured == 'true'
+        env:
+          MONETIZEI_KEYSTORE_PATH: ${{ steps.stable_signing.outputs.keystore_path }}
+          MONETIZEI_KEYSTORE_PASSWORD: ${{ secrets.MONETIZEI_KEYSTORE_PASSWORD }}
+          MONETIZEI_KEY_ALIAS: ${{ secrets.MONETIZEI_KEY_ALIAS }}
+          MONETIZEI_KEY_PASSWORD: ${{ secrets.MONETIZEI_KEY_PASSWORD }}
+        run: gradle :app:assembleRelease --stacktrace
+
+      - name: Verify stable APK signature
+        if: steps.stable_signing.outputs.configured == 'true'
+        shell: bash
+        run: |
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          test -n "$APKSIGNER"
+          "$APKSIGNER" verify --verbose --print-certs app/build/outputs/apk/release/app-release.apk
+
+      - name: Upload stable signed update APK
+        if: steps.stable_signing.outputs.configured == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: monetizei-update-signed
+          path: app/build/outputs/apk/release/app-release.apk

@@ -8,24 +8,46 @@ enum class RewardState {
     AVAILABLE
 }
 
+enum class RewardCurrency {
+    BRL,
+    USD
+}
+
 data class RewardLedgerEntry(
     val rewardId: String,
     val installationId: String,
     val gameplayLedgerId: String,
     val sessionId: String,
     val amountCents: Long,
+    val currency: RewardCurrency,
     val state: RewardState,
     val policyCode: String,
     val createdAtEpochMs: Long,
     val updatedAtEpochMs: Long
 )
 
-data class RewardWalletSnapshot(
+data class CurrencyRewardBalance(
     val pendingCents: Long = 0,
     val approvedCents: Long = 0,
     val availableCents: Long = 0
 ) {
     val totalCents: Long get() = pendingCents + approvedCents + availableCents
+}
+
+data class RewardWalletSnapshot(
+    val brl: CurrencyRewardBalance = CurrencyRewardBalance(),
+    val usd: CurrencyRewardBalance = CurrencyRewardBalance()
+) {
+    fun balance(currency: RewardCurrency): CurrencyRewardBalance = when (currency) {
+        RewardCurrency.BRL -> brl
+        RewardCurrency.USD -> usd
+    }
+
+    // Backward-compatible aliases for the v0.5 BRL-only HTTP response.
+    val pendingCents: Long get() = brl.pendingCents
+    val approvedCents: Long get() = brl.approvedCents
+    val availableCents: Long get() = brl.availableCents
+    val totalCents: Long get() = brl.totalCents
 }
 
 enum class RewardDecisionCode {
@@ -42,6 +64,7 @@ data class RewardDecision(
     val code: RewardDecisionCode,
     val rewardId: String? = null,
     val amountCents: Long = 0,
+    val currency: RewardCurrency = RewardCurrency.BRL,
     val wallet: RewardWalletSnapshot = RewardWalletSnapshot()
 )
 
@@ -71,7 +94,8 @@ data class RewardPolicy(
     val rewardCentsPerEligibleSession: Long = 0,
     val dailyBudgetCents: Long = 0,
     val minVerifiedScore: Long = 20,
-    val maxRewardsPerInstallationPerUtcDay: Int = 10
+    val maxRewardsPerInstallationPerUtcDay: Int = 10,
+    val currency: RewardCurrency = RewardCurrency.BRL
 ) {
     init {
         require(rewardCentsPerEligibleSession >= 0)
@@ -101,6 +125,7 @@ class RewardService(
                 code = RewardDecisionCode.ALREADY_EVALUATED,
                 rewardId = existing.rewardId,
                 amountCents = existing.amountCents,
+                currency = existing.currency,
                 wallet = wallet(entry.installationId)
             )
         }
@@ -119,7 +144,10 @@ class RewardService(
             return decision(RewardDecisionCode.INSTALLATION_DAILY_LIMIT, entry.installationId)
         }
 
-        val committedToday = sameDay.sumOf { it.amountCents }
+        val committedToday = sameDay
+            .asSequence()
+            .filter { it.currency == policy.currency }
+            .sumOf { it.amountCents }
         val amount = policy.rewardCentsPerEligibleSession
         if (committedToday + amount > policy.dailyBudgetCents) {
             return decision(RewardDecisionCode.DAILY_BUDGET_EXHAUSTED, entry.installationId)
@@ -131,8 +159,9 @@ class RewardService(
             gameplayLedgerId = entry.ledgerId,
             sessionId = entry.sessionId,
             amountCents = amount,
+            currency = policy.currency,
             state = RewardState.PENDING,
-            policyCode = "verified_gameplay_v1",
+            policyCode = "verified_gameplay_v2_${policy.currency.name.lowercase()}",
             createdAtEpochMs = entry.acceptedAtEpochMs,
             updatedAtEpochMs = entry.acceptedAtEpochMs
         )
@@ -144,25 +173,41 @@ class RewardService(
             code = RewardDecisionCode.PENDING_CREATED,
             rewardId = reward.rewardId,
             amountCents = reward.amountCents,
+            currency = reward.currency,
             wallet = wallet(entry.installationId)
         )
     }
 
     @Synchronized
     fun wallet(installationId: String): RewardWalletSnapshot {
-        var pending = 0L
-        var approved = 0L
-        var available = 0L
+        var brlPending = 0L
+        var brlApproved = 0L
+        var brlAvailable = 0L
+        var usdPending = 0L
+        var usdApproved = 0L
+        var usdAvailable = 0L
+
         entries.asSequence()
             .filter { it.installationId == installationId }
             .forEach { reward ->
-                when (reward.state) {
-                    RewardState.PENDING -> pending += reward.amountCents
-                    RewardState.APPROVED -> approved += reward.amountCents
-                    RewardState.AVAILABLE -> available += reward.amountCents
+                when (reward.currency) {
+                    RewardCurrency.BRL -> when (reward.state) {
+                        RewardState.PENDING -> brlPending += reward.amountCents
+                        RewardState.APPROVED -> brlApproved += reward.amountCents
+                        RewardState.AVAILABLE -> brlAvailable += reward.amountCents
+                    }
+                    RewardCurrency.USD -> when (reward.state) {
+                        RewardState.PENDING -> usdPending += reward.amountCents
+                        RewardState.APPROVED -> usdApproved += reward.amountCents
+                        RewardState.AVAILABLE -> usdAvailable += reward.amountCents
+                    }
                 }
             }
-        return RewardWalletSnapshot(pending, approved, available)
+
+        return RewardWalletSnapshot(
+            brl = CurrencyRewardBalance(brlPending, brlApproved, brlAvailable),
+            usd = CurrencyRewardBalance(usdPending, usdApproved, usdAvailable)
+        )
     }
 
     @Synchronized
@@ -190,7 +235,7 @@ class RewardService(
     }
 
     private fun decision(code: RewardDecisionCode, installationId: String) =
-        RewardDecision(code = code, wallet = wallet(installationId))
+        RewardDecision(code = code, currency = policy.currency, wallet = wallet(installationId))
 
     private fun utcDay(epochMs: Long): Long = epochMs / DAY_MS
 

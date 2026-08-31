@@ -30,7 +30,11 @@ class MonetizeiHttpServer(
 
     private fun health(exchange: HttpExchange) {
         if (exchange.requestMethod != "GET") return respond(exchange, 405, "{\"error\":\"method_not_allowed\"}")
-        respond(exchange, 200, "{\"ok\":true,\"storage\":\"ready\",\"walletVersion\":1}")
+        respond(
+            exchange,
+            200,
+            "{\"ok\":true,\"storage\":\"ready\",\"walletVersion\":2,\"currencies\":[\"BRL\",\"USD\"]}"
+        )
     }
 
     private fun register(exchange: HttpExchange) {
@@ -59,7 +63,7 @@ class MonetizeiHttpServer(
             return respond(
                 exchange,
                 202,
-                "{\"accepted\":true,\"ledgerId\":\"${result.ledgerId}\",\"reward\":{\"decision\":\"${reward.code}\",\"amountCents\":${reward.amountCents}},\"wallet\":{\"pendingCents\":${wallet.pendingCents},\"approvedCents\":${wallet.approvedCents},\"availableCents\":${wallet.availableCents}}}"
+                successfulSessionJson(result.ledgerId.orEmpty(), reward, wallet)
             )
         }
 
@@ -75,6 +79,39 @@ class MonetizeiHttpServer(
         }
         respond(exchange, status, "{\"accepted\":false,\"reason\":\"$reason\"}")
     }
+
+    private fun successfulSessionJson(
+        ledgerId: String,
+        reward: RewardDecision,
+        wallet: RewardWalletSnapshot
+    ): String {
+        val brl = wallet.brl
+        val usd = wallet.usd
+        return "{" +
+            "\"accepted\":true," +
+            "\"ledgerId\":\"$ledgerId\"," +
+            "\"reward\":{" +
+                "\"decision\":\"${reward.code}\"," +
+                "\"amountCents\":${reward.amountCents}," +
+                "\"currency\":\"${reward.currency}\"" +
+            "}," +
+            "\"wallet\":{" +
+                // v0.5 BRL-only clients keep reading these legacy aliases.
+                "\"pendingCents\":${brl.pendingCents}," +
+                "\"approvedCents\":${brl.approvedCents}," +
+                "\"availableCents\":${brl.availableCents}," +
+                "\"balances\":{" +
+                    "\"BRL\":${balanceJson(brl)}," +
+                    "\"USD\":${balanceJson(usd)}" +
+                "}" +
+            "}" +
+        "}"
+    }
+
+    private fun balanceJson(balance: CurrencyRewardBalance): String =
+        "{\"pendingCents\":${balance.pendingCents}," +
+            "\"approvedCents\":${balance.approvedCents}," +
+            "\"availableCents\":${balance.availableCents}}"
 
     private fun readBody(exchange: HttpExchange): String =
         exchange.requestBody.bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
@@ -99,7 +136,8 @@ fun main() {
         rewardCentsPerEligibleSession = envLong("MONETIZEI_REWARD_CENTS_PER_SESSION", 0L, 0L, 10_000L),
         dailyBudgetCents = envLong("MONETIZEI_DAILY_REWARD_BUDGET_CENTS", 0L, 0L, 10_000_000L),
         minVerifiedScore = envLong("MONETIZEI_MIN_REWARD_SCORE", 20L, 0L, 10_000L),
-        maxRewardsPerInstallationPerUtcDay = envInt("MONETIZEI_MAX_REWARDS_PER_INSTALLATION_DAY", 10, 0, 10_000)
+        maxRewardsPerInstallationPerUtcDay = envInt("MONETIZEI_MAX_REWARDS_PER_INSTALLATION_DAY", 10, 0, 10_000),
+        currency = envRewardCurrency("MONETIZEI_REWARD_CURRENCY", RewardCurrency.BRL)
     )
     val rewardService = RewardService(persistence = persistence, policy = rewardPolicy)
     val service = SessionIngestService(persistence = persistence, rewardService = rewardService)
@@ -114,7 +152,7 @@ fun main() {
     server.start()
     println(
         "Monetizei backend listening on 0.0.0.0:$port with persistent storage; " +
-            "rewardPolicyEnabled=${rewardPolicy.enabled}"
+            "rewardPolicyEnabled=${rewardPolicy.enabled}; rewardCurrency=${rewardPolicy.currency}"
     )
 }
 
@@ -123,3 +161,10 @@ private fun envLong(name: String, default: Long, min: Long, max: Long): Long =
 
 private fun envInt(name: String, default: Int, min: Int, max: Int): Int =
     System.getenv(name)?.toIntOrNull()?.coerceIn(min, max) ?: default
+
+private fun envRewardCurrency(name: String, default: RewardCurrency): RewardCurrency =
+    System.getenv(name)
+        ?.trim()
+        ?.uppercase()
+        ?.let { value -> runCatching { RewardCurrency.valueOf(value) }.getOrNull() }
+        ?: default

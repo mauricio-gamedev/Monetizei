@@ -69,22 +69,53 @@ class TelemetrySyncClient(
 
 data class HttpResponse(val code: Int, val body: String)
 
-data class RemoteRewardWallet(
-    val pendingCents: Long,
-    val approvedCents: Long,
-    val availableCents: Long
+data class RemoteCurrencyRewardBalance(
+    val pendingCents: Long = 0,
+    val approvedCents: Long = 0,
+    val availableCents: Long = 0
 )
 
+data class RemoteRewardWallet(
+    val brl: RemoteCurrencyRewardBalance = RemoteCurrencyRewardBalance(),
+    val usd: RemoteCurrencyRewardBalance = RemoteCurrencyRewardBalance()
+) {
+    // Compatibility helpers for code that still treats the wallet as BRL-only.
+    val pendingCents: Long get() = brl.pendingCents
+    val approvedCents: Long get() = brl.approvedCents
+    val availableCents: Long get() = brl.availableCents
+}
+
 object RewardWalletResponseParser {
-    private val pending = Regex("\\\"pendingCents\\\"\\s*:\\s*(\\d+)")
-    private val approved = Regex("\\\"approvedCents\\\"\\s*:\\s*(\\d+)")
-    private val available = Regex("\\\"availableCents\\\"\\s*:\\s*(\\d+)")
+    private val pending = Regex("\"pendingCents\"\\s*:\\s*(\\d+)")
+    private val approved = Regex("\"approvedCents\"\\s*:\\s*(\\d+)")
+    private val available = Regex("\"availableCents\"\\s*:\\s*(\\d+)")
 
     fun parse(body: String): RemoteRewardWallet? {
+        val brl = parseCurrency(body, "BRL")
+        val usd = parseCurrency(body, "USD")
+        if (brl != null && usd != null) {
+            return RemoteRewardWallet(brl = brl, usd = usd)
+        }
+
+        // v0.5 backend fallback: top-level wallet fields represented BRL only.
+        val legacyBrl = parseBalance(body) ?: return null
+        return RemoteRewardWallet(brl = legacyBrl)
+    }
+
+    private fun parseCurrency(body: String, code: String): RemoteCurrencyRewardBalance? {
+        val objectMatch = Regex("\"$code\"\\s*:\\s*\\{([^{}]*)}")
+            .find(body)
+            ?.groupValues
+            ?.get(1)
+            ?: return null
+        return parseBalance(objectMatch)
+    }
+
+    private fun parseBalance(body: String): RemoteCurrencyRewardBalance? {
         val pendingCents = pending.find(body)?.groupValues?.get(1)?.toLongOrNull() ?: return null
         val approvedCents = approved.find(body)?.groupValues?.get(1)?.toLongOrNull() ?: return null
         val availableCents = available.find(body)?.groupValues?.get(1)?.toLongOrNull() ?: return null
-        return RemoteRewardWallet(pendingCents, approvedCents, availableCents)
+        return RemoteCurrencyRewardBalance(pendingCents, approvedCents, availableCents)
     }
 }
 
