@@ -3,6 +3,7 @@ package io.github.astromg01.monetizei.game
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Paint
+import android.graphics.RectF
 import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.SurfaceHolder
@@ -21,6 +22,7 @@ class GameSurfaceView(
 
     private val backgroundPaint = Paint().apply { color = 0xFF111318.toInt() }
     private val targetPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF7CF3C6.toInt() }
+    private val payoutButtonPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF2CD49B.toInt() }
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0xFFF4F7FA.toInt()
         textSize = 48f
@@ -33,6 +35,12 @@ class GameSurfaceView(
         color = 0xFFB5BEC8.toInt()
         textSize = 26f
     }
+    private val payoutButtonTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFF07130F.toInt()
+        textSize = 30f
+        isFakeBoldText = true
+    }
+    private val payoutButtonRect = RectF()
 
     @Volatile
     private var running = false
@@ -137,11 +145,12 @@ class GameSurfaceView(
 
     private fun drawFinished(canvas: Canvas) {
         val wallet = rewardRepository.getWallet()
-        val remote = telemetryRecorder?.rewardWallet()
+        val recorder = telemetryRecorder
+        val remote = recorder?.rewardWallet()
         val center = height / 2f
 
         canvas.drawText("Sessão concluída", 48f, center - 165f, textPaint)
-        canvas.drawText("Toque para jogar novamente", 48f, center - 105f, secondaryTextPaint)
+        canvas.drawText("Toque fora do botão para jogar novamente", 48f, center - 105f, secondaryTextPaint)
         canvas.drawText("Coins: ${wallet.softCoins} | XP: ${wallet.xp}", 48f, center - 55f, secondaryTextPaint)
 
         if (remote == null) {
@@ -172,7 +181,22 @@ class GameSurfaceView(
                 walletTextPaint
             )
         }
-        canvas.drawText(liveTelemetryStatus(), 48f, center + 185f, secondaryTextPaint)
+        canvas.drawText(liveTelemetryStatus(), 48f, center + 180f, walletTextPaint)
+
+        val canWithdraw = (remote?.brl?.availableCents ?: 0L) > 0L || recorder?.hasPendingWithdrawal() == true
+        if (canWithdraw && recorder != null) {
+            payoutButtonRect.set(48f, center + 220f, width - 48f, center + 310f)
+            canvas.drawRoundRect(payoutButtonRect, 22f, 22f, payoutButtonPaint)
+            val label = if (recorder.hasPendingWithdrawal()) "Atualizar saque PayPal" else "Sacar BRL via PayPal"
+            canvas.drawText(label, payoutButtonRect.left + 28f, payoutButtonRect.centerY() + 10f, payoutButtonTextPaint)
+        } else {
+            payoutButtonRect.setEmpty()
+        }
+
+        val withdrawalLine = withdrawalStatusLine()
+        if (withdrawalLine != null) {
+            canvas.drawText(withdrawalLine, 48f, center + 360f, walletTextPaint)
+        }
     }
 
     private fun brl(cents: Long): String {
@@ -185,6 +209,24 @@ class GameSurfaceView(
         val dollars = cents / 100
         val centsPart = cents % 100
         return "US$ $dollars.${centsPart.toString().padStart(2, '0')}"
+    }
+
+    private fun withdrawalStatusLine(): String? {
+        val recorder = telemetryRecorder ?: return null
+        return when (val status = recorder.withdrawalStatus()) {
+            "idle" -> null
+            "requesting" -> "Saque: enviando pedido..."
+            "processing" -> "Saque: processando no PayPal"
+            "paid" -> "Saque: pago pelo PayPal ✓"
+            "no_available" -> "Saque: sem saldo disponível"
+            "provider_disabled" -> "Saque: PayPal ainda não configurado"
+            "network_error" -> "Saque: falha de rede; toque para tentar de novo"
+            else -> if (status.startsWith("failed_")) {
+                "Saque: falhou (${status.removePrefix("failed_")})"
+            } else {
+                "Saque: $status"
+            }
+        }
     }
 
     private fun liveTelemetryStatus(): String {
@@ -210,6 +252,10 @@ class GameSurfaceView(
         if (event.action != MotionEvent.ACTION_DOWN) return true
 
         if (sessionFinished) {
+            if (!payoutButtonRect.isEmpty && payoutButtonRect.contains(event.x, event.y)) {
+                telemetryRecorder?.requestWithdrawal("BRL")
+                return true
+            }
             resetSession()
             return true
         }
@@ -229,6 +275,7 @@ class GameSurfaceView(
         sessionFinished = false
         resultCommitted = false
         telemetryStatus = "Sessão em andamento"
+        payoutButtonRect.setEmpty()
         startedAt = SystemClock.elapsedRealtime()
         startedAtEpochMs = System.currentTimeMillis()
         finishedAt = 0L

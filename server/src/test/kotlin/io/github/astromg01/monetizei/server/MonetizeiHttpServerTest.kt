@@ -58,6 +58,39 @@ class MonetizeiHttpServerTest {
     }
 
     @Test
+    fun walletEndpointReturnsCurrentBalanceWithoutNewGameplay() {
+        server.close()
+        val installationId = UUID.randomUUID().toString()
+        val rewardService = RewardService(
+            initialEntries = listOf(
+                RewardLedgerEntry(
+                    rewardId = "wallet-reward",
+                    installationId = installationId,
+                    gameplayLedgerId = "wallet-ledger",
+                    sessionId = "wallet-session",
+                    amountCents = 7L,
+                    currency = RewardCurrency.BRL,
+                    state = RewardState.AVAILABLE,
+                    policyCode = "test",
+                    createdAtEpochMs = 1_000L,
+                    updatedAtEpochMs = 1_000L
+                )
+            )
+        )
+        server = MonetizeiHttpServer(
+            bindAddress = InetSocketAddress("127.0.0.1", 0),
+            rewardService = rewardService
+        )
+        server.start()
+
+        val response = get("/v1/wallet?installationId=$installationId")
+        assertEquals(200, response.first)
+        assertTrue(response.second.contains("\"BRL\""))
+        assertTrue(response.second.contains("\"availableCents\":7"))
+        assertEquals(400, get("/v1/wallet?installationId=not-a-uuid").first)
+    }
+
+    @Test
     fun adminApprovalRequiresTokenAndApprovesOnlyOnePendingReward() {
         server.close()
         val installationId = "test-installation"
@@ -165,6 +198,21 @@ class MonetizeiHttpServerTest {
         assertEquals(0L, wallet.pendingCents)
         assertEquals(1L, wallet.approvedCents)
         assertEquals(1L, wallet.availableCents)
+    }
+
+    private fun get(path: String): Pair<Int, String> {
+        val connection = (URL("http://127.0.0.1:${server.port}$path").openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 2_000
+            readTimeout = 2_000
+        }
+        return try {
+            val code = connection.responseCode
+            val stream = if (code >= 400) connection.errorStream else connection.inputStream
+            code to stream.bufferedReader().use { it.readText() }
+        } finally {
+            connection.disconnect()
+        }
     }
 
     private fun post(path: String, body: String, bearerToken: String? = null): Pair<Int, String> {
