@@ -21,6 +21,7 @@ class MonetizeiHttpServer(
         createContext("/v1/installations") { exchange -> register(exchange) }
         createContext("/v1/sessions") { exchange -> submit(exchange) }
         createContext("/v1/admin/rewards/approve-next") { exchange -> approveNextReward(exchange) }
+        createContext("/v1/admin/rewards/make-next-available") { exchange -> makeNextRewardAvailable(exchange) }
     }
 
     val port: Int get() = server.address.port
@@ -113,6 +114,38 @@ class MonetizeiHttpServer(
             exchange,
             200,
             "{\"result\":\"APPROVED\",\"rewardId\":\"${approved.rewardId}\",\"amountCents\":${approved.amountCents},\"currency\":\"${approved.currency}\",\"state\":\"${approved.state}\"}"
+        )
+    }
+
+    private fun makeNextRewardAvailable(exchange: HttpExchange) {
+        if (exchange.requestMethod != "POST") {
+            return respond(exchange, 405, "{\"error\":\"method_not_allowed\"}")
+        }
+
+        val rewards = rewardService
+        val expectedToken = adminToken?.takeIf { it.isNotBlank() }
+        if (rewards == null || expectedToken == null) {
+            return respond(exchange, 404, "{\"error\":\"admin_disabled\"}")
+        }
+        if (!authorized(exchange, expectedToken)) {
+            return respond(exchange, 401, "{\"error\":\"unauthorized\"}")
+        }
+
+        val approved = rewards.snapshot()
+            .asSequence()
+            .filter { it.state == RewardState.APPROVED }
+            .minWithOrNull(compareBy<RewardLedgerEntry> { it.createdAtEpochMs }.thenBy { it.rewardId })
+            ?: return respond(exchange, 404, "{\"result\":\"NO_APPROVED\"}")
+
+        if (!rewards.makeAvailable(approved.rewardId, System.currentTimeMillis())) {
+            return respond(exchange, 503, "{\"result\":\"TRANSITION_FAILED\"}")
+        }
+
+        val available = rewards.snapshot().first { it.rewardId == approved.rewardId }
+        respond(
+            exchange,
+            200,
+            "{\"result\":\"AVAILABLE\",\"rewardId\":\"${available.rewardId}\",\"amountCents\":${available.amountCents},\"currency\":\"${available.currency}\",\"state\":\"${available.state}\"}"
         )
     }
 
