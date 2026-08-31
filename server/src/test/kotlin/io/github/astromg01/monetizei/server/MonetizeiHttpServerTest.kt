@@ -17,6 +17,7 @@ import java.util.Base64
 import java.util.UUID
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
@@ -56,13 +57,71 @@ class MonetizeiHttpServerTest {
         assertEquals(409, replay.first)
     }
 
-    private fun post(path: String, body: String): Pair<Int, String> {
+    @Test
+    fun adminApprovalRequiresTokenAndApprovesOnlyOnePendingReward() {
+        server.close()
+        val installationId = "test-installation"
+        val rewardService = RewardService(
+            initialEntries = listOf(
+                RewardLedgerEntry(
+                    rewardId = "reward-1",
+                    installationId = installationId,
+                    gameplayLedgerId = "ledger-1",
+                    sessionId = "session-1",
+                    amountCents = 1,
+                    currency = RewardCurrency.BRL,
+                    state = RewardState.PENDING,
+                    policyCode = "test",
+                    createdAtEpochMs = 1_000L,
+                    updatedAtEpochMs = 1_000L
+                ),
+                RewardLedgerEntry(
+                    rewardId = "reward-2",
+                    installationId = installationId,
+                    gameplayLedgerId = "ledger-2",
+                    sessionId = "session-2",
+                    amountCents = 1,
+                    currency = RewardCurrency.BRL,
+                    state = RewardState.PENDING,
+                    policyCode = "test",
+                    createdAtEpochMs = 2_000L,
+                    updatedAtEpochMs = 2_000L
+                )
+            )
+        )
+        server = MonetizeiHttpServer(
+            bindAddress = InetSocketAddress("127.0.0.1", 0),
+            rewardService = rewardService,
+            adminToken = "test-admin-token"
+        )
+        server.start()
+
+        assertEquals(401, post("/v1/admin/rewards/approve-next", "{}").first)
+        val approved = post(
+            "/v1/admin/rewards/approve-next",
+            "{}",
+            bearerToken = "test-admin-token"
+        )
+        assertEquals(200, approved.first)
+        assertTrue(approved.second.contains("\"rewardId\":\"reward-1\""))
+        assertTrue(approved.second.contains("\"state\":\"APPROVED\""))
+
+        val wallet = rewardService.wallet(installationId).brl
+        assertEquals(1L, wallet.pendingCents)
+        assertEquals(1L, wallet.approvedCents)
+        assertEquals(0L, wallet.availableCents)
+    }
+
+    private fun post(path: String, body: String, bearerToken: String? = null): Pair<Int, String> {
         val connection = (URL("http://127.0.0.1:${server.port}$path").openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 2_000
             readTimeout = 2_000
             doOutput = true
             setRequestProperty("Content-Type", "application/json")
+            if (bearerToken != null) {
+                setRequestProperty("Authorization", "Bearer $bearerToken")
+            }
         }
         return try {
             connection.outputStream.bufferedWriter().use { it.write(body) }
