@@ -5,6 +5,7 @@ import com.sun.net.httpserver.HttpServer
 import io.github.astromg01.monetizei.protocol.ProtocolJson
 import java.net.InetSocketAddress
 import java.nio.charset.StandardCharsets
+import java.nio.file.Paths
 import java.util.concurrent.Executors
 
 class MonetizeiHttpServer(
@@ -29,7 +30,7 @@ class MonetizeiHttpServer(
 
     private fun health(exchange: HttpExchange) {
         if (exchange.requestMethod != "GET") return respond(exchange, 405, "{\"error\":\"method_not_allowed\"}")
-        respond(exchange, 200, "{\"ok\":true}")
+        respond(exchange, 200, "{\"ok\":true,\"storage\":\"ready\"}")
     }
 
     private fun register(exchange: HttpExchange) {
@@ -42,6 +43,7 @@ class MonetizeiHttpServer(
             RegistrationResult.ALREADY_REGISTERED -> respond(exchange, 200, "{\"result\":\"$result\"}")
             RegistrationResult.KEY_CONFLICT -> respond(exchange, 409, "{\"result\":\"$result\"}")
             RegistrationResult.INVALID -> respond(exchange, 400, "{\"result\":\"$result\"}")
+            RegistrationResult.STORAGE_FAILURE -> respond(exchange, 503, "{\"result\":\"$result\"}")
         }
     }
 
@@ -63,6 +65,7 @@ class MonetizeiHttpServer(
             IngestRejectReason.INVALID_SIGNATURE -> 401
             IngestRejectReason.REPLAY -> 409
             IngestRejectReason.RATE_LIMITED -> 429
+            IngestRejectReason.STORAGE_FAILURE -> 503
         }
         respond(exchange, status, "{\"accepted\":false,\"reason\":\"$reason\"}")
     }
@@ -81,8 +84,20 @@ class MonetizeiHttpServer(
 
 fun main() {
     val port = System.getenv("PORT")?.toIntOrNull()?.takeIf { it in 1..65535 } ?: 8080
-    val server = MonetizeiHttpServer(InetSocketAddress("0.0.0.0", port))
-    Runtime.getRuntime().addShutdownHook(Thread { server.close() })
+    val dbPath = Paths.get(
+        System.getenv("MONETIZEI_DB_PATH")?.takeIf { it.isNotBlank() }
+            ?: "./data/monetizei.db"
+    )
+    val persistence = SqliteServerPersistence(dbPath)
+    val service = SessionIngestService(persistence = persistence)
+    val server = MonetizeiHttpServer(InetSocketAddress("0.0.0.0", port), service)
+
+    Runtime.getRuntime().addShutdownHook(
+        Thread {
+            runCatching { server.close() }
+            runCatching { persistence.close() }
+        }
+    )
     server.start()
-    println("Monetizei backend listening on 0.0.0.0:$port")
+    println("Monetizei backend listening on 0.0.0.0:$port with persistent storage")
 }
