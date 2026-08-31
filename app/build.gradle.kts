@@ -2,6 +2,17 @@ plugins {
     id("com.android.application")
 }
 
+val signingStorePath = System.getenv("MONETIZEI_KEYSTORE_PATH")
+val signingStorePassword = System.getenv("MONETIZEI_KEYSTORE_PASSWORD")
+val signingKeyAlias = System.getenv("MONETIZEI_KEY_ALIAS")
+val signingKeyPassword = System.getenv("MONETIZEI_KEY_PASSWORD")
+val stableSigningConfigured = listOf(
+    signingStorePath,
+    signingStorePassword,
+    signingKeyAlias,
+    signingKeyPassword
+).all { !it.isNullOrBlank() }
+
 android {
     namespace = "io.github.astromg01.monetizei"
     compileSdk = 37
@@ -10,8 +21,8 @@ android {
         applicationId = "io.github.astromg01.monetizei"
         minSdk = 26
         targetSdk = 37
-        versionCode = 7
-        versionName = "0.5.0"
+        versionCode = 8
+        versionName = "0.5.1"
         buildConfigField(
             "String",
             "MONETIZEI_API_BASE_URL",
@@ -23,9 +34,24 @@ android {
         buildConfig = true
     }
 
+    val stableUpdateSigning = if (stableSigningConfigured) {
+        signingConfigs.create("stableUpdate") {
+            storeFile = file(signingStorePath!!)
+            storePassword = signingStorePassword
+            keyAlias = signingKeyAlias
+            keyPassword = signingKeyPassword
+        }
+    } else {
+        null
+    }
+
     buildTypes {
+        debug {
+            stableUpdateSigning?.let { signingConfig = it }
+        }
         release {
             isMinifyEnabled = true
+            stableUpdateSigning?.let { signingConfig = it }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

@@ -5,3 +5,8 @@ build/
 app/build/
 *.iml
 .DS_Store
+
+# APK signing material must never be committed.
+*.jks
+*.keystore
+.signing/

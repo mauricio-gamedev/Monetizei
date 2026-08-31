@@ -28,15 +28,39 @@ class RewardServiceTest {
         assertEquals(RewardDecisionCode.PENDING_CREATED, first.code)
         assertEquals(RewardDecisionCode.PENDING_CREATED, second.code)
         assertEquals(RewardDecisionCode.INSTALLATION_DAILY_LIMIT, third.code)
-        assertEquals(4L, service.wallet(installation).pendingCents)
+        assertEquals(RewardCurrency.BRL, first.currency)
+        assertEquals(4L, service.wallet(installation).brl.pendingCents)
 
         val rewardId = first.rewardId!!
         assertTrue(service.approve(rewardId, 4_000L))
-        assertEquals(2L, service.wallet(installation).pendingCents)
-        assertEquals(2L, service.wallet(installation).approvedCents)
+        assertEquals(2L, service.wallet(installation).brl.pendingCents)
+        assertEquals(2L, service.wallet(installation).brl.approvedCents)
         assertTrue(service.makeAvailable(rewardId, 5_000L))
-        assertEquals(2L, service.wallet(installation).availableCents)
+        assertEquals(2L, service.wallet(installation).brl.availableCents)
         assertFalse(service.makeAvailable(rewardId, 6_000L))
+    }
+
+    @Test
+    fun usdPolicyCreatesUsdBalanceWithoutChangingBrlBalance() {
+        val service = RewardService(
+            policy = RewardPolicy(
+                rewardCentsPerEligibleSession = 5,
+                dailyBudgetCents = 20,
+                minVerifiedScore = 20,
+                maxRewardsPerInstallationPerUtcDay = 2,
+                currency = RewardCurrency.USD
+            )
+        )
+        val installation = UUID.randomUUID().toString()
+
+        val result = service.evaluateAcceptedGameplay(gameplay(installation, 1, 42, 1_000L))
+        val wallet = result.wallet
+
+        assertEquals(RewardDecisionCode.PENDING_CREATED, result.code)
+        assertEquals(RewardCurrency.USD, result.currency)
+        assertEquals(0L, wallet.brl.totalCents)
+        assertEquals(5L, wallet.usd.pendingCents)
+        assertEquals(5L, wallet.usd.totalCents)
     }
 
     @Test
@@ -46,7 +70,8 @@ class RewardServiceTest {
         val result = service.evaluateAcceptedGameplay(gameplay(installation, 1, 99, 1_000L))
 
         assertEquals(RewardDecisionCode.DISABLED, result.code)
-        assertEquals(0L, result.wallet.totalCents)
+        assertEquals(0L, result.wallet.brl.totalCents)
+        assertEquals(0L, result.wallet.usd.totalCents)
         assertTrue(service.snapshot().isEmpty())
     }
 
@@ -83,7 +108,7 @@ class RewardServiceTest {
         finishedAtEpochMs = acceptedAt,
         durationMs = 30_000L,
         verifiedScoreUnits = score,
-        appVersion = "0.5.0",
+        appVersion = "0.5.1",
         acceptedAtEpochMs = acceptedAt
     )
 
