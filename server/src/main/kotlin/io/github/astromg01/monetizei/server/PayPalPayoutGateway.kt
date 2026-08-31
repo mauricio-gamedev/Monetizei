@@ -15,6 +15,8 @@ class PayPalPayoutGateway(
 ) : PayoutGateway {
     override val providerName: String = "paypal"
     override val enabled: Boolean = clientId.isNotBlank() && clientSecret.isNotBlank() && receiverEmail.isNotBlank()
+    override val settlementMode: PayoutSettlementMode =
+        if (sandbox) PayoutSettlementMode.SANDBOX else PayoutSettlementMode.LIVE
 
     private val apiBase: String
         get() = if (sandbox) "https://api-m.sandbox.paypal.com" else "https://api-m.paypal.com"

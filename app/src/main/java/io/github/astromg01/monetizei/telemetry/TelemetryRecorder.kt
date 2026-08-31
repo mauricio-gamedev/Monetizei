@@ -96,7 +96,11 @@ class TelemetryRecorder(
                     }
                     "FAILED" -> {
                         clearPendingWithdrawal()
-                        withdrawalState.set("failed_${response.failureCode ?: response.httpCode}")
+                        if (response.failureCode == SANDBOX_VERIFIED_CODE) {
+                            withdrawalState.set("sandbox_verified")
+                        } else {
+                            withdrawalState.set("failed_${response.failureCode ?: response.httpCode}")
+                        }
                     }
                     else -> {
                         if (response.httpCode in 400..499) clearPendingWithdrawal()
@@ -147,5 +151,6 @@ class TelemetryRecorder(
 
     private companion object {
         const val KEY_PENDING_REQUEST_ID = "pending_request_id"
+        const val SANDBOX_VERIFIED_CODE = "SANDBOX_VERIFIED_NO_SETTLEMENT"
     }
 }

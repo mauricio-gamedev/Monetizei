@@ -47,6 +47,41 @@ class PayoutCoreTest {
     }
 
     @Test
+    fun sandboxSuccessRestoresAvailableBalanceAndNeverMarksRealRewardPaid() {
+        val fixture = fixture()
+        val gateway = FakeGateway(PayoutSettlementMode.SANDBOX)
+        val persistence = FakePayoutPersistence()
+        val service = WithdrawalService(
+            rewardService = fixture.rewardService,
+            persistence = persistence,
+            registrationLookup = { fixture.registration },
+            gateway = gateway
+        )
+        val requestId = UUID.randomUUID().toString()
+        val envelope = signedEnvelope(fixture, requestId, NOW)
+
+        val submitted = service.request(envelope, NOW)
+        assertEquals(WithdrawalResultCode.SUBMITTED, submitted.code)
+        assertEquals(RewardState.PAYOUT_PENDING, fixture.rewardService.snapshot().single().state)
+        assertEquals(0L, submitted.wallet.brl.availableCents)
+
+        gateway.statusResult = ProviderStatusResult(ProviderPayoutState.SUCCESS)
+        val verified = service.request(envelope, NOW + 1_000L)
+        assertEquals(WithdrawalResultCode.FAILED, verified.code)
+        assertEquals("SANDBOX_VERIFIED_NO_SETTLEMENT", verified.failureCode)
+        assertEquals(RewardState.AVAILABLE, fixture.rewardService.snapshot().single().state)
+        assertEquals(1L, verified.wallet.brl.availableCents)
+        assertEquals(PayoutState.FAILED, persistence.loadPayout(requestId)?.state)
+        assertEquals("SANDBOX_VERIFIED_NO_SETTLEMENT", persistence.loadPayout(requestId)?.failureCode)
+
+        val repeated = service.request(envelope, NOW + 2_000L)
+        assertEquals(WithdrawalResultCode.FAILED, repeated.code)
+        assertEquals("SANDBOX_VERIFIED_NO_SETTLEMENT", repeated.failureCode)
+        assertEquals(1, gateway.submitCount)
+        assertEquals(RewardState.AVAILABLE, fixture.rewardService.snapshot().single().state)
+    }
+
+    @Test
     fun retryableSubmitKeepsSameRequestReservedAndDoesNotReleaseBalance() {
         val fixture = fixture()
         val gateway = FakeGateway().apply {
@@ -107,7 +142,7 @@ class PayoutCoreTest {
             keyId = KeyIds.fromEncodedPublicKey(keyPair.public.encoded),
             publicKeyBase64 = publicBase64,
             signatureAlgorithm = SessionProtocol.SIGNATURE_ALGORITHM,
-            appVersion = "0.6.0",
+            appVersion = "0.6.1",
             createdAtEpochMs = NOW - 10_000L
         )
         val reward = RewardLedgerEntry(
@@ -136,7 +171,7 @@ class PayoutCoreTest {
             requestId = requestId,
             currency = "BRL",
             requestedAtEpochMs = requestedAt,
-            appVersion = "0.6.0"
+            appVersion = "0.6.1"
         )
         val signature = Signature.getInstance(SessionProtocol.SIGNATURE_ALGORITHM).apply {
             initSign(fixture.keyPair.private)
@@ -156,7 +191,9 @@ class PayoutCoreTest {
         val rewardService: RewardService
     )
 
-    private class FakeGateway : PayoutGateway {
+    private class FakeGateway(
+        override val settlementMode: PayoutSettlementMode = PayoutSettlementMode.LIVE
+    ) : PayoutGateway {
         override val providerName = "paypal"
         override val enabled = true
         var submitCount = 0

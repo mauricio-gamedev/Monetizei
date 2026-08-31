@@ -23,11 +23,18 @@ Never commit PayPal credentials to the repository or put them in the Android APK
 
 ## State machine
 
+Live mode:
+
 `AVAILABLE -> PAYOUT_PENDING -> PAID`
 
-- AVAILABLE: withdrawable balance.
+Sandbox mode:
+
+`AVAILABLE -> PAYOUT_PENDING -> AVAILABLE`
+
+- AVAILABLE: withdrawable real-reward ledger balance.
 - PAYOUT_PENDING: reserved while PayPal processes the payout; it is not available for a second withdrawal.
-- PAID: PayPal confirmed the payout batch succeeded.
+- PAID: used only when a LIVE PayPal payout batch succeeds.
+- In Sandbox, a successful PayPal test is recorded as `FAILED` with `SANDBOX_VERIFIED_NO_SETTLEMENT` in the payout ledger, the Android app reports the sandbox verification as successful, and every reserved reward is restored to AVAILABLE. Sandbox can therefore validate the provider integration without consuming or marking a real reward as paid.
 - A definitive PayPal failure releases the reserved rewards back to AVAILABLE.
 - Network / HTTP 5xx ambiguity keeps the payout reserved and retries with the same request ID.
 
