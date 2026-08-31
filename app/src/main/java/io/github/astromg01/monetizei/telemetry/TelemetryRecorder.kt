@@ -42,6 +42,7 @@ class TelemetryRecorder(
 
     private fun scheduleSync() {
         if (!syncQueued.compareAndSet(false, true)) return
+        status.set("syncing")
         executor.execute {
             try {
                 val report = runCatching { syncClient.sync(outbox) }
