@@ -47,12 +47,16 @@ class PayPalPayoutGateway(
             bearerToken = token,
             body = body,
             requestId = requestId
-        ) ?: return ProviderSubmitResult(false, failureCode = "PAYPAL_NETWORK_ERROR")
+        ) ?: return ProviderSubmitResult(
+            accepted = false,
+            failureCode = "PAYPAL_NETWORK_ERROR",
+            retryable = true
+        )
 
         if (response.code == 201) {
             val batchId = extractString(response.body, "payout_batch_id")
             return if (batchId.isNullOrBlank()) {
-                ProviderSubmitResult(false, failureCode = "PAYPAL_MALFORMED_RESPONSE")
+                ProviderSubmitResult(false, failureCode = "PAYPAL_MALFORMED_RESPONSE", retryable = true)
             } else {
                 ProviderSubmitResult(true, providerBatchId = batchId)
             }
@@ -63,7 +67,11 @@ class PayPalPayoutGateway(
             if (!batchId.isNullOrBlank()) return ProviderSubmitResult(true, providerBatchId = batchId)
         }
 
-        return ProviderSubmitResult(false, failureCode = "PAYPAL_HTTP_${response.code}")
+        return ProviderSubmitResult(
+            accepted = false,
+            failureCode = "PAYPAL_HTTP_${response.code}",
+            retryable = response.code >= 500
+        )
     }
 
     override fun status(providerBatchId: String): ProviderStatusResult {
