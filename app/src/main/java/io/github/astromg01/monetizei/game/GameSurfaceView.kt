@@ -217,6 +217,7 @@ class GameSurfaceView(
             "idle" -> null
             "requesting" -> "Saque: enviando pedido..."
             "processing" -> "Saque: processando no PayPal"
+            "sandbox_verified" -> "Sandbox PayPal validado ✓ • saldo preservado"
             "paid" -> "Saque: pago pelo PayPal ✓"
             "no_available" -> "Saque: sem saldo disponível"
             "provider_disabled" -> "Saque: PayPal ainda não configurado"
