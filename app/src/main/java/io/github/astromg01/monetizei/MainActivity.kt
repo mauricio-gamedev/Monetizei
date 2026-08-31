@@ -13,15 +13,26 @@ import io.github.astromg01.monetizei.telemetry.TelemetryRecorder
 class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enterImmersiveMode()
+        runCatching { enterImmersiveMode() }
 
         val rewardRepository = LocalRewardRepository(applicationContext)
-        val appVersion = packageManager.getPackageInfo(packageName, 0).versionName ?: "unknown"
-        val telemetryRecorder = TelemetryRecorder(applicationContext, appVersion).also {
-            it.initialize()
-        }
+        val appVersion = runCatching {
+            packageManager.getPackageInfo(packageName, 0).versionName ?: "unknown"
+        }.getOrDefault("unknown")
+
+        // Telemetry must never be allowed to block gameplay startup.
+        val telemetryRecorder = runCatching {
+            TelemetryRecorder(applicationContext, appVersion)
+        }.getOrNull()
 
         setContentView(GameSurfaceView(this, rewardRepository, telemetryRecorder))
+
+        telemetryRecorder?.let { recorder ->
+            Thread(
+                { recorder.initialize() },
+                "monetizei-telemetry-init"
+            ).start()
+        }
     }
 
     @Suppress("DEPRECATION")
