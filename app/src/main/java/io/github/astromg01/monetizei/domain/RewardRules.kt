@@ -1,12 +1,14 @@
 package io.github.astromg01.monetizei.domain
 
+import io.github.astromg01.monetizei.protocol.SessionProtocol
+
 object RewardRules {
-    const val SESSION_DURATION_MS = 30_000L
+    const val SESSION_DURATION_MS = SessionProtocol.SESSION_DURATION_MS
     const val MAX_SCORE_PER_SECOND = 15
-    const val MAX_SESSION_SCORE = (SESSION_DURATION_MS / 1_000L * MAX_SCORE_PER_SECOND).toInt()
+    const val MAX_SESSION_SCORE = SessionProtocol.MAX_SESSION_SCORE
 
     /**
-     * v0.1 grants only NON-CASH in-game progression.
+     * Grants only NON-CASH in-game progression.
      * Real-world rewards must be authorized by the backend after eligibility,
      * fraud and policy checks; ad views/clicks must never mint withdrawable value.
      */

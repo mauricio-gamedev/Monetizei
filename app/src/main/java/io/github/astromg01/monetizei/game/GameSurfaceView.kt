@@ -9,12 +9,14 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import io.github.astromg01.monetizei.data.RewardRepository
 import io.github.astromg01.monetizei.domain.RewardRules
+import io.github.astromg01.monetizei.telemetry.TelemetryRecorder
 import kotlin.math.hypot
 import kotlin.random.Random
 
 class GameSurfaceView(
     context: Context,
-    private val rewardRepository: RewardRepository
+    private val rewardRepository: RewardRepository,
+    private val telemetryRecorder: TelemetryRecorder
 ) : SurfaceView(context), SurfaceHolder.Callback, Runnable {
 
     private val backgroundPaint = Paint().apply { color = 0xFF111318.toInt() }
@@ -33,6 +35,7 @@ class GameSurfaceView(
     private var renderThread: Thread? = null
 
     private var startedAt = 0L
+    private var startedAtEpochMs = 0L
     private var finishedAt = 0L
     private var score = 0
     private var targetX = 0f
@@ -40,6 +43,7 @@ class GameSurfaceView(
     private var targetRadius = 72f
     private var sessionFinished = false
     private var resultCommitted = false
+    private var telemetryStatus = "Sessão em andamento"
 
     init {
         holder.addCallback(this)
@@ -81,6 +85,17 @@ class GameSurfaceView(
         if (sessionFinished && !resultCommitted) {
             val result = RewardRules.evaluate(score, finishedAt - startedAt)
             rewardRepository.creditSession(result)
+
+            val signed = telemetryRecorder.recordSession(
+                result = result,
+                startedAtEpochMs = startedAtEpochMs,
+                finishedAtEpochMs = System.currentTimeMillis()
+            )
+            telemetryStatus = if (signed) {
+                "Sessão assinada • fila ${telemetryRecorder.pendingCount()}"
+            } else {
+                "Telemetria local indisponível"
+            }
             resultCommitted = true
         }
     }
@@ -110,10 +125,11 @@ class GameSurfaceView(
 
     private fun drawFinished(canvas: Canvas) {
         val wallet = rewardRepository.getWallet()
-        canvas.drawText("Sessão concluída", 48f, height / 2f - 50f, textPaint)
-        canvas.drawText("Toque para jogar novamente", 48f, height / 2f + 10f, secondaryTextPaint)
-        canvas.drawText("Saldo real: somente servidor", 48f, height / 2f + 65f, secondaryTextPaint)
-        canvas.drawText("Coins: ${wallet.softCoins} | XP: ${wallet.xp}", 48f, height / 2f + 120f, secondaryTextPaint)
+        canvas.drawText("Sessão concluída", 48f, height / 2f - 75f, textPaint)
+        canvas.drawText("Toque para jogar novamente", 48f, height / 2f - 10f, secondaryTextPaint)
+        canvas.drawText("Saldo real: somente servidor", 48f, height / 2f + 45f, secondaryTextPaint)
+        canvas.drawText("Coins: ${wallet.softCoins} | XP: ${wallet.xp}", 48f, height / 2f + 100f, secondaryTextPaint)
+        canvas.drawText(telemetryStatus, 48f, height / 2f + 155f, secondaryTextPaint)
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -138,7 +154,9 @@ class GameSurfaceView(
         targetRadius = 72f
         sessionFinished = false
         resultCommitted = false
+        telemetryStatus = "Sessão em andamento"
         startedAt = SystemClock.elapsedRealtime()
+        startedAtEpochMs = System.currentTimeMillis()
         finishedAt = 0L
         moveTarget()
     }
