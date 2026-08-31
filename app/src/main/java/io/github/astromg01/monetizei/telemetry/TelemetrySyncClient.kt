@@ -3,6 +3,7 @@ package io.github.astromg01.monetizei.telemetry
 import io.github.astromg01.monetizei.protocol.ProtocolJson
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 
 class TelemetrySyncClient(
     private val baseUrl: String,
@@ -11,7 +12,8 @@ class TelemetrySyncClient(
 ) {
     fun sync(outbox: LocalTelemetryOutbox): SyncReport {
         if (baseUrl.isBlank()) return SyncReport(skipped = true, pending = outbox.pendingCount())
-        val registration = outbox.registration() ?: return SyncReport(pending = outbox.pendingCount(), error = "missing_registration")
+        val registration = outbox.registration()
+            ?: return SyncReport(pending = outbox.pendingCount(), error = "missing_registration")
 
         val registrationResponse = post("/v1/installations", ProtocolJson.encodeRegistration(registration))
         if (registrationResponse.code !in 200..299) {
@@ -41,29 +43,50 @@ class TelemetrySyncClient(
             }
         }
 
+        val encodedInstallationId = URLEncoder.encode(registration.installationId, Charsets.UTF_8.name())
+        val walletResponse = runCatching {
+            get("/v1/wallet?installationId=$encodedInstallationId")
+        }.getOrNull()
+        if (walletResponse?.code in 200..299) {
+            latestWallet = RewardWalletResponseParser.parse(walletResponse?.body.orEmpty()) ?: latestWallet
+        }
+
         return SyncReport(uploaded = uploaded, pending = outbox.pendingCount(), wallet = latestWallet)
     }
 
     private fun post(path: String, body: String): HttpResponse {
-        val normalized = baseUrl.trimEnd('/') + path
-        val connection = (URL(normalized).openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
+        val connection = open(path, "POST").apply { doOutput = true }
+        return try {
+            connection.outputStream.bufferedWriter(Charsets.UTF_8).use { it.write(body) }
+            response(connection)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun get(path: String): HttpResponse {
+        val connection = open(path, "GET")
+        return try {
+            response(connection)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun open(path: String, method: String): HttpURLConnection =
+        (URL(baseUrl.trimEnd('/') + path).openConnection() as HttpURLConnection).apply {
+            requestMethod = method
             connectTimeout = connectTimeoutMs
             readTimeout = readTimeoutMs
-            doOutput = true
             useCaches = false
             setRequestProperty("Content-Type", "application/json; charset=utf-8")
             setRequestProperty("Accept", "application/json")
         }
 
-        return try {
-            connection.outputStream.bufferedWriter(Charsets.UTF_8).use { it.write(body) }
-            val code = connection.responseCode
-            val stream = if (code >= 400) connection.errorStream else connection.inputStream
-            HttpResponse(code, stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty())
-        } finally {
-            connection.disconnect()
-        }
+    private fun response(connection: HttpURLConnection): HttpResponse {
+        val code = connection.responseCode
+        val stream = if (code >= 400) connection.errorStream else connection.inputStream
+        return HttpResponse(code, stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty())
     }
 }
 
