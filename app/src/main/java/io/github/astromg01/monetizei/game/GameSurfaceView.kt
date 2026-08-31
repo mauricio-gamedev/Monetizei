@@ -16,7 +16,7 @@ import kotlin.random.Random
 class GameSurfaceView(
     context: Context,
     private val rewardRepository: RewardRepository,
-    private val telemetryRecorder: TelemetryRecorder
+    private val telemetryRecorder: TelemetryRecorder?
 ) : SurfaceView(context), SurfaceHolder.Callback, Runnable {
 
     private val backgroundPaint = Paint().apply { color = 0xFF111318.toInt() }
@@ -67,8 +67,15 @@ class GameSurfaceView(
     override fun run() {
         while (running) {
             val frameStart = SystemClock.elapsedRealtime()
-            update(frameStart)
-            drawFrame()
+            val rendered = runCatching {
+                update(frameStart)
+                drawFrame()
+            }.isSuccess
+
+            if (!rendered) {
+                SystemClock.sleep(100)
+                continue
+            }
 
             val elapsed = SystemClock.elapsedRealtime() - frameStart
             val sleepMs = (16L - elapsed).coerceAtLeast(2L)
@@ -86,13 +93,13 @@ class GameSurfaceView(
             val result = RewardRules.evaluate(score, finishedAt - startedAt)
             rewardRepository.creditSession(result)
 
-            val signed = telemetryRecorder.recordSession(
+            val signed = telemetryRecorder?.recordSession(
                 result = result,
                 startedAtEpochMs = startedAtEpochMs,
                 finishedAtEpochMs = System.currentTimeMillis()
-            )
+            ) ?: false
             telemetryStatus = if (signed) {
-                "Sessão assinada • fila ${telemetryRecorder.pendingCount()}"
+                "Sessão assinada • fila ${telemetryRecorder?.pendingCount() ?: 0}"
             } else {
                 "Telemetria local indisponível"
             }
@@ -101,6 +108,7 @@ class GameSurfaceView(
     }
 
     private fun drawFrame() {
+        if (!holder.surface.isValid) return
         val canvas = holder.lockCanvas() ?: return
         try {
             canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), backgroundPaint)
