@@ -8,6 +8,7 @@ import android.view.WindowInsets
 import android.view.WindowInsetsController
 import io.github.astromg01.monetizei.data.LocalRewardRepository
 import io.github.astromg01.monetizei.game.GameSurfaceView
+import io.github.astromg01.monetizei.telemetry.TelemetryRecorder
 
 class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -15,7 +16,12 @@ class MainActivity : Activity() {
         enterImmersiveMode()
 
         val rewardRepository = LocalRewardRepository(applicationContext)
-        setContentView(GameSurfaceView(this, rewardRepository))
+        val appVersion = packageManager.getPackageInfo(packageName, 0).versionName ?: "unknown"
+        val telemetryRecorder = TelemetryRecorder(applicationContext, appVersion).also {
+            it.initialize()
+        }
+
+        setContentView(GameSurfaceView(this, rewardRepository, telemetryRecorder))
     }
 
     @Suppress("DEPRECATION")

@@ -2,31 +2,34 @@
 
 Android game-first project that separates gameplay progression, advertising and real-world reward authorization from day one.
 
-## v0.1
-- Native Android/Kotlin, no Compose.
-- Lightweight `SurfaceView` game loop.
-- 30-second tap challenge prototype.
-- Persistent local soft coins + XP.
-- Reward boundary separated behind `RewardRepository`.
-- Unit tests for reward rules and malformed/impossible session input.
-- Android 8+ compatible immersive-mode fallback.
-- No AdMob SDK and no PayPal secrets/client payout code.
-- Architecture prepared for server-authoritative rewards and payout processing.
+## v0.2
+- Native Android/Kotlin game remains lightweight and Compose-free.
+- Persistent local soft coins + XP remain non-cash.
+- Anonymous installation UUID persisted per install.
+- EC P-256 signing key generated inside Android Keystore.
+- Every completed 30-second session receives a UUID + monotonic sequence and ECDSA signature.
+- Signed sessions are persisted in a bounded local outbox for future upload.
+- Shared `protocol` module keeps Android/server signature bytes identical.
+- New framework-free `server` core verifies registrations and signatures.
+- Anti-replay and rolling rate limiting run before ledger insertion.
+- Accepted sessions create append-only verified-gameplay ledger entries, not money.
+- CI tests Android + protocol + server, builds the debug APK and uploads it as an artifact.
 
 ## Reward boundary
-The APK can grant only non-cash progression. Withdrawable money must be created by the future backend after gameplay, eligibility and anti-fraud checks. Ad views/clicks must never directly generate withdrawable balance.
+The APK can grant only non-cash progression. A valid session signature does not create withdrawable value. Real-world rewards must be authorized later by the backend after eligibility, fraud and policy checks. Ad views/clicks must never directly generate withdrawable balance.
 
 ## Build requirements
 - JDK 17
 - Gradle 9.5.0
 - Android Gradle Plugin 9.3.0
-- AGP 9 built-in Kotlin support
+- Kotlin JVM plugin 2.3.21 for shared/server modules
+- AGP 9 built-in Kotlin support for Android
 - Android SDK / compileSdk 37
 
 ## Next milestone
-1. Anonymous installation/user identity.
-2. Signed session telemetry model.
-3. Backend API contract.
-4. Append-only server ledger.
-5. Anti-replay + rate limiting.
-6. Only then: compliant monetization and payout integration.
+1. HTTP transport for registration/session upload.
+2. Durable database-backed registry, replay guard and ledger.
+3. Server-issued installation challenge / stronger enrollment.
+4. Behavioral anti-fraud and integrity signals.
+5. Reward-policy service with budget controls.
+6. Only then: compliant ads and PayPal payout integration.

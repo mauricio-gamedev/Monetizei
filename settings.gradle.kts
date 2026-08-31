@@ -16,3 +16,5 @@ dependencyResolutionManagement {
 
 rootProject.name = "Monetizei"
 include(":app")
+include(":protocol")
+include(":server")
