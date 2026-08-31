@@ -13,8 +13,30 @@ import java.util.ArrayDeque
 import java.util.Base64
 import java.util.UUID
 
-class InstallationRegistry {
+interface SessionPersistence {
+    fun loadRegistrations(): List<InstallationRegistration>
+    fun loadLedgerEntries(): List<GameplayLedgerEntry>
+    fun saveRegistration(registration: InstallationRegistration): Boolean
+    fun saveLedgerEntry(entry: GameplayLedgerEntry): Boolean
+}
+
+object NoopSessionPersistence : SessionPersistence {
+    override fun loadRegistrations() = emptyList<InstallationRegistration>()
+    override fun loadLedgerEntries() = emptyList<GameplayLedgerEntry>()
+    override fun saveRegistration(registration: InstallationRegistration) = true
+    override fun saveLedgerEntry(entry: GameplayLedgerEntry) = true
+}
+
+class InstallationRegistry(initial: Iterable<InstallationRegistration> = emptyList()) {
     private val registrations = mutableMapOf<String, InstallationRegistration>()
+
+    init {
+        initial.forEach { registration ->
+            if (validRegistration(registration)) {
+                registrations[registration.installationId] = registration
+            }
+        }
+    }
 
     @Synchronized
     fun register(registration: InstallationRegistration): RegistrationResult {
@@ -37,6 +59,14 @@ class InstallationRegistry {
     }
 
     @Synchronized
+    fun rollbackCreated(registration: InstallationRegistration) {
+        val current = registrations[registration.installationId]
+        if (current?.keyId == registration.keyId) {
+            registrations.remove(registration.installationId)
+        }
+    }
+
+    @Synchronized
     fun get(installationId: String): InstallationRegistration? = registrations[installationId]
 
     private fun validRegistration(registration: InstallationRegistration): Boolean = runCatching {
@@ -53,7 +83,8 @@ enum class RegistrationResult {
     CREATED,
     ALREADY_REGISTERED,
     KEY_CONFLICT,
-    INVALID
+    INVALID,
+    STORAGE_FAILURE
 }
 
 class SignatureVerifier {
@@ -73,9 +104,17 @@ class SignatureVerifier {
     }.getOrDefault(false)
 }
 
-class ReplayGuard {
+class ReplayGuard(initialEntries: Iterable<GameplayLedgerEntry> = emptyList()) {
     private val highestSequence = mutableMapOf<String, Long>()
     private val acceptedSessionIds = mutableSetOf<String>()
+
+    init {
+        initialEntries.forEach { entry ->
+            val highest = highestSequence[entry.installationId] ?: 0L
+            highestSequence[entry.installationId] = maxOf(highest, entry.sequence)
+            acceptedSessionIds.add(entry.sessionId)
+        }
+    }
 
     fun isReplay(payload: SessionPayload): Boolean {
         val highest = highestSequence[payload.installationId] ?: 0L
@@ -94,15 +133,23 @@ class SessionRateLimiter(
 ) {
     private val acceptedAt = mutableMapOf<String, ArrayDeque<Long>>()
 
-    fun allow(installationId: String, nowEpochMs: Long): Boolean {
+    fun canAccept(installationId: String, nowEpochMs: Long): Boolean {
         val queue = acceptedAt.getOrPut(installationId) { ArrayDeque() }
+        prune(queue, nowEpochMs)
+        return queue.size < maxAcceptedSessions
+    }
+
+    fun commit(installationId: String, nowEpochMs: Long) {
+        val queue = acceptedAt.getOrPut(installationId) { ArrayDeque() }
+        prune(queue, nowEpochMs)
+        queue.addLast(nowEpochMs)
+    }
+
+    private fun prune(queue: ArrayDeque<Long>, nowEpochMs: Long) {
         val cutoff = nowEpochMs - windowMs
         while (queue.isNotEmpty() && queue.first() <= cutoff) {
             queue.removeFirst()
         }
-        if (queue.size >= maxAcceptedSessions) return false
-        queue.addLast(nowEpochMs)
-        return true
     }
 }
 
@@ -111,25 +158,34 @@ data class GameplayLedgerEntry(
     val installationId: String,
     val sessionId: String,
     val sequence: Long,
+    val startedAtEpochMs: Long,
+    val finishedAtEpochMs: Long,
+    val durationMs: Long,
     val verifiedScoreUnits: Long,
+    val appVersion: String,
     val acceptedAtEpochMs: Long
 )
 
-class AppendOnlyGameplayLedger {
-    private val entries = mutableListOf<GameplayLedgerEntry>()
+class AppendOnlyGameplayLedger(initialEntries: Iterable<GameplayLedgerEntry> = emptyList()) {
+    private val entries = initialEntries.toMutableList()
 
-    @Synchronized
-    fun append(payload: SessionPayload, acceptedAtEpochMs: Long): GameplayLedgerEntry {
-        val entry = GameplayLedgerEntry(
+    fun prepare(payload: SessionPayload, acceptedAtEpochMs: Long): GameplayLedgerEntry =
+        GameplayLedgerEntry(
             ledgerId = UUID.randomUUID().toString(),
             installationId = payload.installationId,
             sessionId = payload.sessionId,
             sequence = payload.sequence,
+            startedAtEpochMs = payload.startedAtEpochMs,
+            finishedAtEpochMs = payload.finishedAtEpochMs,
+            durationMs = payload.durationMs,
             verifiedScoreUnits = payload.score.toLong(),
+            appVersion = payload.appVersion,
             acceptedAtEpochMs = acceptedAtEpochMs
         )
+
+    @Synchronized
+    fun commit(entry: GameplayLedgerEntry) {
         entries.add(entry)
-        return entry
     }
 
     @Synchronized
@@ -142,7 +198,8 @@ enum class IngestRejectReason {
     MALFORMED_SESSION,
     INVALID_SIGNATURE,
     REPLAY,
-    RATE_LIMITED
+    RATE_LIMITED,
+    STORAGE_FAILURE
 }
 
 data class IngestResult(
@@ -152,14 +209,24 @@ data class IngestResult(
 )
 
 class SessionIngestService(
-    private val registry: InstallationRegistry = InstallationRegistry(),
+    private val persistence: SessionPersistence = NoopSessionPersistence,
+    private val registry: InstallationRegistry = InstallationRegistry(persistence.loadRegistrations()),
     private val verifier: SignatureVerifier = SignatureVerifier(),
-    private val replayGuard: ReplayGuard = ReplayGuard(),
+    private val replayGuard: ReplayGuard = ReplayGuard(persistence.loadLedgerEntries()),
     private val rateLimiter: SessionRateLimiter = SessionRateLimiter(),
-    private val ledger: AppendOnlyGameplayLedger = AppendOnlyGameplayLedger()
+    private val ledger: AppendOnlyGameplayLedger = AppendOnlyGameplayLedger(persistence.loadLedgerEntries())
 ) {
-    fun register(registration: InstallationRegistration): RegistrationResult =
-        registry.register(registration)
+    @Synchronized
+    fun register(registration: InstallationRegistration): RegistrationResult {
+        val result = registry.register(registration)
+        if (result != RegistrationResult.CREATED) return result
+
+        if (!persistence.saveRegistration(registration)) {
+            registry.rollbackCreated(registration)
+            return RegistrationResult.STORAGE_FAILURE
+        }
+        return RegistrationResult.CREATED
+    }
 
     fun ledgerSnapshot(): List<GameplayLedgerEntry> = ledger.snapshot()
 
@@ -181,12 +248,18 @@ class SessionIngestService(
         if (replayGuard.isReplay(payload)) {
             return rejected(IngestRejectReason.REPLAY)
         }
-        if (!rateLimiter.allow(payload.installationId, receivedAtEpochMs)) {
+        if (!rateLimiter.canAccept(payload.installationId, receivedAtEpochMs)) {
             return rejected(IngestRejectReason.RATE_LIMITED)
         }
 
+        val entry = ledger.prepare(payload, receivedAtEpochMs)
+        if (!persistence.saveLedgerEntry(entry)) {
+            return rejected(IngestRejectReason.STORAGE_FAILURE)
+        }
+
         replayGuard.commit(payload)
-        val entry = ledger.append(payload, receivedAtEpochMs)
+        rateLimiter.commit(payload.installationId, receivedAtEpochMs)
+        ledger.commit(entry)
         return IngestResult(accepted = true, ledgerId = entry.ledgerId)
     }
 

@@ -15,6 +15,8 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "Monetizei"
-include(":app")
 include(":protocol")
 include(":server")
+if (System.getenv("MONETIZEI_SERVER_ONLY") != "true") {
+    include(":app")
+}
