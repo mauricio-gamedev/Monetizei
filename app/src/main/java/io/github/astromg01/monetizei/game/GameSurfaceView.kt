@@ -99,7 +99,7 @@ class GameSurfaceView(
                 finishedAtEpochMs = System.currentTimeMillis()
             ) ?: false
             telemetryStatus = if (signed) {
-                "Sessão assinada • fila ${telemetryRecorder?.pendingCount() ?: 0}"
+                "Sessão assinada"
             } else {
                 "Telemetria local indisponível"
             }
@@ -137,7 +137,26 @@ class GameSurfaceView(
         canvas.drawText("Toque para jogar novamente", 48f, height / 2f - 10f, secondaryTextPaint)
         canvas.drawText("Saldo real: somente servidor", 48f, height / 2f + 45f, secondaryTextPaint)
         canvas.drawText("Coins: ${wallet.softCoins} | XP: ${wallet.xp}", 48f, height / 2f + 100f, secondaryTextPaint)
-        canvas.drawText(telemetryStatus, 48f, height / 2f + 155f, secondaryTextPaint)
+        canvas.drawText(liveTelemetryStatus(), 48f, height / 2f + 155f, secondaryTextPaint)
+    }
+
+    private fun liveTelemetryStatus(): String {
+        val recorder = telemetryRecorder ?: return telemetryStatus
+        if (!resultCommitted) return telemetryStatus
+
+        val pending = recorder.pendingCount()
+        return when (val sync = recorder.syncStatus()) {
+            "syncing" -> "Servidor: enviando • fila $pending"
+            "synced" -> "Servidor: sincronizado • fila $pending"
+            "server_not_configured" -> "Servidor não configurado • fila $pending"
+            "local_only" -> "$telemetryStatus • fila $pending"
+            else -> when {
+                sync.startsWith("pending_") -> "Servidor: pendente • fila $pending"
+                sync.startsWith("registration_http_") -> "Erro ao registrar • fila $pending"
+                sync.startsWith("session_http_") -> "Erro ao enviar • fila $pending"
+                else -> "Servidor: $sync • fila $pending"
+            }
+        }
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
