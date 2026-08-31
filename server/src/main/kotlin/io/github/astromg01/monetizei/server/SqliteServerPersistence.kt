@@ -6,7 +6,7 @@ import java.nio.file.Path
 import java.sql.Connection
 import java.sql.DriverManager
 
-class SqliteServerPersistence(dbPath: Path) : SessionPersistence, RewardPersistence, AutoCloseable {
+class SqliteServerPersistence(dbPath: Path) : SessionPersistence, RewardPersistence, PayoutPersistence, AutoCloseable {
     private val connection: Connection
 
     init {
@@ -58,12 +58,49 @@ class SqliteServerPersistence(dbPath: Path) : SessionPersistence, RewardPersiste
                     session_id TEXT NOT NULL UNIQUE,
                     amount_cents INTEGER NOT NULL CHECK(amount_cents > 0),
                     currency TEXT NOT NULL DEFAULT 'BRL' CHECK(currency IN ('BRL','USD')),
-                    state TEXT NOT NULL CHECK(state IN ('PENDING','APPROVED','AVAILABLE')),
+                    state TEXT NOT NULL CHECK(state IN ('PENDING','APPROVED','AVAILABLE','PAYOUT_PENDING','PAID')),
                     policy_code TEXT NOT NULL,
                     created_at_epoch_ms INTEGER NOT NULL,
                     updated_at_epoch_ms INTEGER NOT NULL,
                     FOREIGN KEY(installation_id) REFERENCES installations(installation_id),
                     FOREIGN KEY(gameplay_ledger_id) REFERENCES gameplay_ledger(ledger_id)
+                )
+                """.trimIndent()
+            )
+        }
+
+        migrateRewardCurrencyColumn()
+        migrateRewardStateConstraint()
+        createPayoutTablesAndIndexes()
+    }
+
+    private fun createPayoutTablesAndIndexes() {
+        connection.createStatement().use { statement ->
+            statement.execute(
+                """
+                CREATE TABLE IF NOT EXISTS payout_ledger (
+                    request_id TEXT PRIMARY KEY,
+                    installation_id TEXT NOT NULL,
+                    currency TEXT NOT NULL CHECK(currency IN ('BRL','USD')),
+                    amount_cents INTEGER NOT NULL CHECK(amount_cents > 0),
+                    state TEXT NOT NULL CHECK(state IN ('REQUESTED','SUBMITTED','PAID','FAILED')),
+                    provider TEXT NOT NULL,
+                    provider_batch_id TEXT,
+                    failure_code TEXT,
+                    created_at_epoch_ms INTEGER NOT NULL,
+                    updated_at_epoch_ms INTEGER NOT NULL,
+                    FOREIGN KEY(installation_id) REFERENCES installations(installation_id)
+                )
+                """.trimIndent()
+            )
+            statement.execute(
+                """
+                CREATE TABLE IF NOT EXISTS payout_rewards (
+                    request_id TEXT NOT NULL,
+                    reward_id TEXT NOT NULL,
+                    PRIMARY KEY(request_id, reward_id),
+                    FOREIGN KEY(request_id) REFERENCES payout_ledger(request_id),
+                    FOREIGN KEY(reward_id) REFERENCES reward_ledger(reward_id)
                 )
                 """.trimIndent()
             )
@@ -76,12 +113,14 @@ class SqliteServerPersistence(dbPath: Path) : SessionPersistence, RewardPersiste
             statement.execute(
                 "CREATE INDEX IF NOT EXISTS idx_reward_created ON reward_ledger(created_at_epoch_ms)"
             )
-        }
-
-        migrateRewardCurrencyColumn()
-        connection.createStatement().use { statement ->
             statement.execute(
                 "CREATE INDEX IF NOT EXISTS idx_reward_installation_currency_state ON reward_ledger(installation_id, currency, state)"
+            )
+            statement.execute(
+                "CREATE INDEX IF NOT EXISTS idx_payout_installation_created ON payout_ledger(installation_id, created_at_epoch_ms)"
+            )
+            statement.execute(
+                "CREATE INDEX IF NOT EXISTS idx_payout_provider_batch ON payout_ledger(provider_batch_id)"
             )
         }
     }
@@ -90,9 +129,7 @@ class SqliteServerPersistence(dbPath: Path) : SessionPersistence, RewardPersiste
         val columns = mutableSetOf<String>()
         connection.createStatement().use { statement ->
             statement.executeQuery("PRAGMA table_info(reward_ledger)").use { rows ->
-                while (rows.next()) {
-                    columns += rows.getString("name")
-                }
+                while (rows.next()) columns += rows.getString("name")
             }
         }
         if ("currency" !in columns) {
@@ -101,6 +138,59 @@ class SqliteServerPersistence(dbPath: Path) : SessionPersistence, RewardPersiste
                     "ALTER TABLE reward_ledger ADD COLUMN currency TEXT NOT NULL DEFAULT 'BRL' CHECK(currency IN ('BRL','USD'))"
                 )
             }
+        }
+    }
+
+    private fun migrateRewardStateConstraint() {
+        val tableSql = connection.prepareStatement(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'reward_ledger'"
+        ).use { statement ->
+            statement.executeQuery().use { rows -> if (rows.next()) rows.getString("sql") else "" }
+        }
+        if (tableSql.contains("PAYOUT_PENDING") && tableSql.contains("PAID")) return
+
+        val oldAutoCommit = connection.autoCommit
+        connection.autoCommit = false
+        try {
+            connection.createStatement().use { statement ->
+                statement.execute("ALTER TABLE reward_ledger RENAME TO reward_ledger_legacy")
+                statement.execute(
+                    """
+                    CREATE TABLE reward_ledger (
+                        reward_id TEXT PRIMARY KEY,
+                        installation_id TEXT NOT NULL,
+                        gameplay_ledger_id TEXT NOT NULL UNIQUE,
+                        session_id TEXT NOT NULL UNIQUE,
+                        amount_cents INTEGER NOT NULL CHECK(amount_cents > 0),
+                        currency TEXT NOT NULL DEFAULT 'BRL' CHECK(currency IN ('BRL','USD')),
+                        state TEXT NOT NULL CHECK(state IN ('PENDING','APPROVED','AVAILABLE','PAYOUT_PENDING','PAID')),
+                        policy_code TEXT NOT NULL,
+                        created_at_epoch_ms INTEGER NOT NULL,
+                        updated_at_epoch_ms INTEGER NOT NULL,
+                        FOREIGN KEY(installation_id) REFERENCES installations(installation_id),
+                        FOREIGN KEY(gameplay_ledger_id) REFERENCES gameplay_ledger(ledger_id)
+                    )
+                    """.trimIndent()
+                )
+                statement.execute(
+                    """
+                    INSERT INTO reward_ledger(
+                        reward_id, installation_id, gameplay_ledger_id, session_id,
+                        amount_cents, currency, state, policy_code, created_at_epoch_ms, updated_at_epoch_ms
+                    )
+                    SELECT reward_id, installation_id, gameplay_ledger_id, session_id,
+                           amount_cents, currency, state, policy_code, created_at_epoch_ms, updated_at_epoch_ms
+                    FROM reward_ledger_legacy
+                    """.trimIndent()
+                )
+                statement.execute("DROP TABLE reward_ledger_legacy")
+            }
+            connection.commit()
+        } catch (error: Exception) {
+            connection.rollback()
+            throw error
+        } finally {
+            connection.autoCommit = oldAutoCommit
         }
     }
 
@@ -286,6 +376,110 @@ class SqliteServerPersistence(dbPath: Path) : SessionPersistence, RewardPersiste
             statement.executeUpdate() == 1
         }
     }.getOrDefault(false)
+
+    @Synchronized
+    override fun loadPayout(requestId: String): PayoutLedgerEntry? = runCatching {
+        connection.prepareStatement(
+            """
+            SELECT request_id, installation_id, currency, amount_cents, state, provider,
+                   provider_batch_id, failure_code, created_at_epoch_ms, updated_at_epoch_ms
+            FROM payout_ledger
+            WHERE request_id = ?
+            """.trimIndent()
+        ).use { statement ->
+            statement.setString(1, requestId)
+            statement.executeQuery().use { rows ->
+                if (!rows.next()) return@runCatching null
+                PayoutLedgerEntry(
+                    requestId = rows.getString("request_id"),
+                    installationId = rows.getString("installation_id"),
+                    currency = RewardCurrency.valueOf(rows.getString("currency")),
+                    amountCents = rows.getLong("amount_cents"),
+                    state = PayoutState.valueOf(rows.getString("state")),
+                    provider = rows.getString("provider"),
+                    providerBatchId = rows.getString("provider_batch_id"),
+                    failureCode = rows.getString("failure_code"),
+                    createdAtEpochMs = rows.getLong("created_at_epoch_ms"),
+                    updatedAtEpochMs = rows.getLong("updated_at_epoch_ms")
+                )
+            }
+        }
+    }.getOrNull()
+
+    @Synchronized
+    override fun savePayout(entry: PayoutLedgerEntry): Boolean = runCatching {
+        connection.prepareStatement(
+            """
+            INSERT INTO payout_ledger(
+                request_id, installation_id, currency, amount_cents, state, provider,
+                provider_batch_id, failure_code, created_at_epoch_ms, updated_at_epoch_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """.trimIndent()
+        ).use { statement ->
+            statement.setString(1, entry.requestId)
+            statement.setString(2, entry.installationId)
+            statement.setString(3, entry.currency.name)
+            statement.setLong(4, entry.amountCents)
+            statement.setString(5, entry.state.name)
+            statement.setString(6, entry.provider)
+            statement.setString(7, entry.providerBatchId)
+            statement.setString(8, entry.failureCode)
+            statement.setLong(9, entry.createdAtEpochMs)
+            statement.setLong(10, entry.updatedAtEpochMs)
+            statement.executeUpdate() == 1
+        }
+    }.getOrDefault(false)
+
+    @Synchronized
+    override fun updatePayout(
+        requestId: String,
+        expectedState: PayoutState,
+        newState: PayoutState,
+        providerBatchId: String?,
+        failureCode: String?,
+        updatedAtEpochMs: Long
+    ): Boolean = runCatching {
+        connection.prepareStatement(
+            """
+            UPDATE payout_ledger
+            SET state = ?, provider_batch_id = COALESCE(?, provider_batch_id), failure_code = ?, updated_at_epoch_ms = ?
+            WHERE request_id = ? AND state = ?
+            """.trimIndent()
+        ).use { statement ->
+            statement.setString(1, newState.name)
+            statement.setString(2, providerBatchId)
+            statement.setString(3, failureCode)
+            statement.setLong(4, updatedAtEpochMs)
+            statement.setString(5, requestId)
+            statement.setString(6, expectedState.name)
+            statement.executeUpdate() == 1
+        }
+    }.getOrDefault(false)
+
+    @Synchronized
+    override fun savePayoutReward(requestId: String, rewardId: String): Boolean = runCatching {
+        connection.prepareStatement(
+            "INSERT INTO payout_rewards(request_id, reward_id) VALUES (?, ?)"
+        ).use { statement ->
+            statement.setString(1, requestId)
+            statement.setString(2, rewardId)
+            statement.executeUpdate() == 1
+        }
+    }.getOrDefault(false)
+
+    @Synchronized
+    override fun loadPayoutRewardIds(requestId: String): List<String> {
+        val result = mutableListOf<String>()
+        connection.prepareStatement(
+            "SELECT reward_id FROM payout_rewards WHERE request_id = ? ORDER BY reward_id ASC"
+        ).use { statement ->
+            statement.setString(1, requestId)
+            statement.executeQuery().use { rows ->
+                while (rows.next()) result += rows.getString("reward_id")
+            }
+        }
+        return result
+    }
 
     @Synchronized
     override fun close() {
