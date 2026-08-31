@@ -19,10 +19,12 @@ class TelemetrySyncClient(
         }
 
         var uploaded = 0
+        var latestWallet: RemoteRewardWallet? = null
         for (envelope in outbox.pending()) {
             val response = post("/v1/sessions", ProtocolJson.encodeSession(envelope))
             when {
                 response.code in 200..299 -> {
+                    latestWallet = RewardWalletResponseParser.parse(response.body) ?: latestWallet
                     outbox.remove(envelope.payload.sequence)
                     uploaded += 1
                 }
@@ -30,11 +32,16 @@ class TelemetrySyncClient(
                     outbox.remove(envelope.payload.sequence)
                 }
                 response.code == 429 -> break
-                else -> return SyncReport(uploaded = uploaded, pending = outbox.pendingCount(), error = "session_http_${response.code}")
+                else -> return SyncReport(
+                    uploaded = uploaded,
+                    pending = outbox.pendingCount(),
+                    error = "session_http_${response.code}",
+                    wallet = latestWallet
+                )
             }
         }
 
-        return SyncReport(uploaded = uploaded, pending = outbox.pendingCount())
+        return SyncReport(uploaded = uploaded, pending = outbox.pendingCount(), wallet = latestWallet)
     }
 
     private fun post(path: String, body: String): HttpResponse {
@@ -62,9 +69,29 @@ class TelemetrySyncClient(
 
 data class HttpResponse(val code: Int, val body: String)
 
+data class RemoteRewardWallet(
+    val pendingCents: Long,
+    val approvedCents: Long,
+    val availableCents: Long
+)
+
+object RewardWalletResponseParser {
+    private val pending = Regex("\\\"pendingCents\\\"\\s*:\\s*(\\d+)")
+    private val approved = Regex("\\\"approvedCents\\\"\\s*:\\s*(\\d+)")
+    private val available = Regex("\\\"availableCents\\\"\\s*:\\s*(\\d+)")
+
+    fun parse(body: String): RemoteRewardWallet? {
+        val pendingCents = pending.find(body)?.groupValues?.get(1)?.toLongOrNull() ?: return null
+        val approvedCents = approved.find(body)?.groupValues?.get(1)?.toLongOrNull() ?: return null
+        val availableCents = available.find(body)?.groupValues?.get(1)?.toLongOrNull() ?: return null
+        return RemoteRewardWallet(pendingCents, approvedCents, availableCents)
+    }
+}
+
 data class SyncReport(
     val uploaded: Int = 0,
     val pending: Int,
     val skipped: Boolean = false,
-    val error: String? = null
+    val error: String? = null,
+    val wallet: RemoteRewardWallet? = null
 )

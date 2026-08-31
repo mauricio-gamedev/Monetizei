@@ -205,11 +205,13 @@ enum class IngestRejectReason {
 data class IngestResult(
     val accepted: Boolean,
     val ledgerId: String? = null,
-    val rejectReason: IngestRejectReason? = null
+    val rejectReason: IngestRejectReason? = null,
+    val rewardDecision: RewardDecision? = null
 )
 
 class SessionIngestService(
     private val persistence: SessionPersistence = NoopSessionPersistence,
+    private val rewardService: RewardService = RewardService(),
     private val registry: InstallationRegistry = InstallationRegistry(persistence.loadRegistrations()),
     private val verifier: SignatureVerifier = SignatureVerifier(),
     private val replayGuard: ReplayGuard = ReplayGuard(persistence.loadLedgerEntries()),
@@ -260,7 +262,12 @@ class SessionIngestService(
         replayGuard.commit(payload)
         rateLimiter.commit(payload.installationId, receivedAtEpochMs)
         ledger.commit(entry)
-        return IngestResult(accepted = true, ledgerId = entry.ledgerId)
+        val rewardDecision = rewardService.evaluateAcceptedGameplay(entry)
+        return IngestResult(
+            accepted = true,
+            ledgerId = entry.ledgerId,
+            rewardDecision = rewardDecision
+        )
     }
 
     private fun validPayload(payload: SessionPayload): Boolean = runCatching {

@@ -6,7 +6,7 @@ import java.nio.file.Path
 import java.sql.Connection
 import java.sql.DriverManager
 
-class SqliteServerPersistence(dbPath: Path) : SessionPersistence, AutoCloseable {
+class SqliteServerPersistence(dbPath: Path) : SessionPersistence, RewardPersistence, AutoCloseable {
     private val connection: Connection
 
     init {
@@ -50,7 +50,30 @@ class SqliteServerPersistence(dbPath: Path) : SessionPersistence, AutoCloseable 
                 """.trimIndent()
             )
             statement.execute(
+                """
+                CREATE TABLE IF NOT EXISTS reward_ledger (
+                    reward_id TEXT PRIMARY KEY,
+                    installation_id TEXT NOT NULL,
+                    gameplay_ledger_id TEXT NOT NULL UNIQUE,
+                    session_id TEXT NOT NULL UNIQUE,
+                    amount_cents INTEGER NOT NULL CHECK(amount_cents > 0),
+                    state TEXT NOT NULL CHECK(state IN ('PENDING','APPROVED','AVAILABLE')),
+                    policy_code TEXT NOT NULL,
+                    created_at_epoch_ms INTEGER NOT NULL,
+                    updated_at_epoch_ms INTEGER NOT NULL,
+                    FOREIGN KEY(installation_id) REFERENCES installations(installation_id),
+                    FOREIGN KEY(gameplay_ledger_id) REFERENCES gameplay_ledger(ledger_id)
+                )
+                """.trimIndent()
+            )
+            statement.execute(
                 "CREATE INDEX IF NOT EXISTS idx_ledger_installation_accepted ON gameplay_ledger(installation_id, accepted_at_epoch_ms)"
+            )
+            statement.execute(
+                "CREATE INDEX IF NOT EXISTS idx_reward_installation_state ON reward_ledger(installation_id, state)"
+            )
+            statement.execute(
+                "CREATE INDEX IF NOT EXISTS idx_reward_created ON reward_ledger(created_at_epoch_ms)"
             )
         }
     }
@@ -116,6 +139,36 @@ class SqliteServerPersistence(dbPath: Path) : SessionPersistence, AutoCloseable 
     }
 
     @Synchronized
+    override fun loadRewardEntries(): List<RewardLedgerEntry> {
+        val result = mutableListOf<RewardLedgerEntry>()
+        connection.prepareStatement(
+            """
+            SELECT reward_id, installation_id, gameplay_ledger_id, session_id,
+                   amount_cents, state, policy_code, created_at_epoch_ms, updated_at_epoch_ms
+            FROM reward_ledger
+            ORDER BY created_at_epoch_ms ASC, rowid ASC
+            """.trimIndent()
+        ).use { statement ->
+            statement.executeQuery().use { rows ->
+                while (rows.next()) {
+                    result += RewardLedgerEntry(
+                        rewardId = rows.getString("reward_id"),
+                        installationId = rows.getString("installation_id"),
+                        gameplayLedgerId = rows.getString("gameplay_ledger_id"),
+                        sessionId = rows.getString("session_id"),
+                        amountCents = rows.getLong("amount_cents"),
+                        state = RewardState.valueOf(rows.getString("state")),
+                        policyCode = rows.getString("policy_code"),
+                        createdAtEpochMs = rows.getLong("created_at_epoch_ms"),
+                        updatedAtEpochMs = rows.getLong("updated_at_epoch_ms")
+                    )
+                }
+            }
+        }
+        return result
+    }
+
+    @Synchronized
     override fun saveRegistration(registration: InstallationRegistration): Boolean = runCatching {
         connection.prepareStatement(
             """
@@ -157,6 +210,51 @@ class SqliteServerPersistence(dbPath: Path) : SessionPersistence, AutoCloseable 
             statement.setLong(8, entry.verifiedScoreUnits)
             statement.setString(9, entry.appVersion)
             statement.setLong(10, entry.acceptedAtEpochMs)
+            statement.executeUpdate() == 1
+        }
+    }.getOrDefault(false)
+
+    @Synchronized
+    override fun saveRewardEntry(entry: RewardLedgerEntry): Boolean = runCatching {
+        connection.prepareStatement(
+            """
+            INSERT INTO reward_ledger(
+                reward_id, installation_id, gameplay_ledger_id, session_id,
+                amount_cents, state, policy_code, created_at_epoch_ms, updated_at_epoch_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """.trimIndent()
+        ).use { statement ->
+            statement.setString(1, entry.rewardId)
+            statement.setString(2, entry.installationId)
+            statement.setString(3, entry.gameplayLedgerId)
+            statement.setString(4, entry.sessionId)
+            statement.setLong(5, entry.amountCents)
+            statement.setString(6, entry.state.name)
+            statement.setString(7, entry.policyCode)
+            statement.setLong(8, entry.createdAtEpochMs)
+            statement.setLong(9, entry.updatedAtEpochMs)
+            statement.executeUpdate() == 1
+        }
+    }.getOrDefault(false)
+
+    @Synchronized
+    override fun updateRewardState(
+        rewardId: String,
+        expectedState: RewardState,
+        newState: RewardState,
+        updatedAtEpochMs: Long
+    ): Boolean = runCatching {
+        connection.prepareStatement(
+            """
+            UPDATE reward_ledger
+            SET state = ?, updated_at_epoch_ms = ?
+            WHERE reward_id = ? AND state = ?
+            """.trimIndent()
+        ).use { statement ->
+            statement.setString(1, newState.name)
+            statement.setLong(2, updatedAtEpochMs)
+            statement.setString(3, rewardId)
+            statement.setString(4, expectedState.name)
             statement.executeUpdate() == 1
         }
     }.getOrDefault(false)
