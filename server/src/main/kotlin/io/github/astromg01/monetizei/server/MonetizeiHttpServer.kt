@@ -4,9 +4,11 @@ import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import io.github.astromg01.monetizei.protocol.ProtocolJson
 import java.net.InetSocketAddress
+import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.nio.file.Paths
 import java.security.MessageDigest
+import java.util.UUID
 import java.util.concurrent.Executors
 
 class MonetizeiHttpServer(
@@ -21,6 +23,7 @@ class MonetizeiHttpServer(
         createContext("/health") { exchange -> health(exchange) }
         createContext("/v1/installations") { exchange -> register(exchange) }
         createContext("/v1/sessions") { exchange -> submit(exchange) }
+        createContext("/v1/wallet") { exchange -> wallet(exchange) }
         createContext("/v1/withdrawals") { exchange -> withdraw(exchange) }
         createContext("/v1/admin/rewards/approve-next") { exchange -> approveNextReward(exchange) }
         createContext("/v1/admin/rewards/make-next-available") { exchange -> makeNextRewardAvailable(exchange) }
@@ -84,6 +87,23 @@ class MonetizeiHttpServer(
             IngestRejectReason.STORAGE_FAILURE -> 503
         }
         respond(exchange, status, "{\"accepted\":false,\"reason\":\"$reason\"}")
+    }
+
+    private fun wallet(exchange: HttpExchange) {
+        if (exchange.requestMethod != "GET") {
+            return respond(exchange, 405, "{\"error\":\"method_not_allowed\"}")
+        }
+        val rewards = rewardService
+            ?: return respond(exchange, 503, "{\"error\":\"wallet_unavailable\"}")
+        val installationId = queryParameter(exchange, "installationId")
+            ?: return respond(exchange, 400, "{\"error\":\"missing_installation_id\"}")
+        val validInstallationId = runCatching {
+            UUID.fromString(installationId).toString() == installationId
+        }.getOrDefault(false)
+        if (!validInstallationId) {
+            return respond(exchange, 400, "{\"error\":\"invalid_installation_id\"}")
+        }
+        respond(exchange, 200, "{\"wallet\":${walletJson(rewards.wallet(installationId))}}")
     }
 
     private fun withdraw(exchange: HttpExchange) {
@@ -183,6 +203,20 @@ class MonetizeiHttpServer(
             supplied.toByteArray(StandardCharsets.UTF_8),
             expectedToken.toByteArray(StandardCharsets.UTF_8)
         )
+    }
+
+    private fun queryParameter(exchange: HttpExchange, name: String): String? {
+        val rawQuery = exchange.requestURI.rawQuery ?: return null
+        return rawQuery.split('&')
+            .asSequence()
+            .mapNotNull { pair ->
+                val separator = pair.indexOf('=')
+                if (separator < 0) return@mapNotNull null
+                val key = URLDecoder.decode(pair.substring(0, separator), StandardCharsets.UTF_8)
+                if (key != name) return@mapNotNull null
+                URLDecoder.decode(pair.substring(separator + 1), StandardCharsets.UTF_8)
+            }
+            .firstOrNull()
     }
 
     private fun successfulSessionJson(
