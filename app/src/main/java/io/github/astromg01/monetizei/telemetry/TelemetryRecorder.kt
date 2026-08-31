@@ -23,6 +23,7 @@ class TelemetryRecorder(
     private val executor = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "monetizei-http-sync") }
     private val syncQueued = AtomicBoolean(false)
     private val status = AtomicReference("local_only")
+    private val remoteWallet = AtomicReference<RemoteRewardWallet?>(null)
 
     fun initialize(): Boolean = runCatching {
         outbox.saveRegistration(factory.registration())
@@ -39,6 +40,7 @@ class TelemetryRecorder(
 
     fun pendingCount(): Int = outbox.pendingCount()
     fun syncStatus(): String = status.get()
+    fun rewardWallet(): RemoteRewardWallet? = remoteWallet.get()
 
     private fun scheduleSync() {
         if (!syncQueued.compareAndSet(false, true)) return
@@ -47,6 +49,7 @@ class TelemetryRecorder(
             try {
                 val report = runCatching { syncClient.sync(outbox) }
                     .getOrElse { SyncReport(pending = outbox.pendingCount(), error = it.javaClass.simpleName) }
+                report.wallet?.let { remoteWallet.set(it) }
                 status.set(
                     when {
                         report.skipped -> "server_not_configured"

@@ -9,6 +9,7 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import io.github.astromg01.monetizei.data.RewardRepository
 import io.github.astromg01.monetizei.domain.RewardRules
+import io.github.astromg01.monetizei.telemetry.RemoteRewardWallet
 import io.github.astromg01.monetizei.telemetry.TelemetryRecorder
 import kotlin.math.hypot
 import kotlin.random.Random
@@ -133,11 +134,33 @@ class GameSurfaceView(
 
     private fun drawFinished(canvas: Canvas) {
         val wallet = rewardRepository.getWallet()
-        canvas.drawText("Sessão concluída", 48f, height / 2f - 75f, textPaint)
-        canvas.drawText("Toque para jogar novamente", 48f, height / 2f - 10f, secondaryTextPaint)
-        canvas.drawText("Saldo real: somente servidor", 48f, height / 2f + 45f, secondaryTextPaint)
-        canvas.drawText("Coins: ${wallet.softCoins} | XP: ${wallet.xp}", 48f, height / 2f + 100f, secondaryTextPaint)
-        canvas.drawText(liveTelemetryStatus(), 48f, height / 2f + 155f, secondaryTextPaint)
+        val remote = telemetryRecorder?.rewardWallet()
+        canvas.drawText("Sessão concluída", 48f, height / 2f - 110f, textPaint)
+        canvas.drawText("Toque para jogar novamente", 48f, height / 2f - 45f, secondaryTextPaint)
+        canvas.drawText("Coins: ${wallet.softCoins} | XP: ${wallet.xp}", 48f, height / 2f + 10f, secondaryTextPaint)
+        if (remote == null) {
+            canvas.drawText("Carteira: aguardando servidor", 48f, height / 2f + 65f, secondaryTextPaint)
+        } else {
+            canvas.drawText(
+                "Pendente ${brl(remote.pendingCents)} | Aprovado ${brl(remote.approvedCents)}",
+                48f,
+                height / 2f + 65f,
+                secondaryTextPaint
+            )
+            canvas.drawText(
+                "Disponível ${brl(remote.availableCents)}",
+                48f,
+                height / 2f + 120f,
+                secondaryTextPaint
+            )
+        }
+        canvas.drawText(liveTelemetryStatus(), 48f, height / 2f + 175f, secondaryTextPaint)
+    }
+
+    private fun brl(cents: Long): String {
+        val reais = cents / 100
+        val centavos = cents % 100
+        return "R$ $reais,${centavos.toString().padStart(2, '0')}"
     }
 
     private fun liveTelemetryStatus(): String {

@@ -30,7 +30,7 @@ class MonetizeiHttpServer(
 
     private fun health(exchange: HttpExchange) {
         if (exchange.requestMethod != "GET") return respond(exchange, 405, "{\"error\":\"method_not_allowed\"}")
-        respond(exchange, 200, "{\"ok\":true,\"storage\":\"ready\"}")
+        respond(exchange, 200, "{\"ok\":true,\"storage\":\"ready\",\"walletVersion\":1}")
     }
 
     private fun register(exchange: HttpExchange) {
@@ -54,7 +54,13 @@ class MonetizeiHttpServer(
 
         val result = service.submit(envelope, System.currentTimeMillis())
         if (result.accepted) {
-            return respond(exchange, 202, "{\"accepted\":true,\"ledgerId\":\"${result.ledgerId}\"}")
+            val reward = result.rewardDecision ?: RewardDecision(RewardDecisionCode.DISABLED)
+            val wallet = reward.wallet
+            return respond(
+                exchange,
+                202,
+                "{\"accepted\":true,\"ledgerId\":\"${result.ledgerId}\",\"reward\":{\"decision\":\"${reward.code}\",\"amountCents\":${reward.amountCents}},\"wallet\":{\"pendingCents\":${wallet.pendingCents},\"approvedCents\":${wallet.approvedCents},\"availableCents\":${wallet.availableCents}}}"
+            )
         }
 
         val reason = result.rejectReason ?: IngestRejectReason.MALFORMED_SESSION
@@ -89,7 +95,14 @@ fun main() {
             ?: "./data/monetizei.db"
     )
     val persistence = SqliteServerPersistence(dbPath)
-    val service = SessionIngestService(persistence = persistence)
+    val rewardPolicy = RewardPolicy(
+        rewardCentsPerEligibleSession = envLong("MONETIZEI_REWARD_CENTS_PER_SESSION", 0L, 0L, 10_000L),
+        dailyBudgetCents = envLong("MONETIZEI_DAILY_REWARD_BUDGET_CENTS", 0L, 0L, 10_000_000L),
+        minVerifiedScore = envLong("MONETIZEI_MIN_REWARD_SCORE", 20L, 0L, 10_000L),
+        maxRewardsPerInstallationPerUtcDay = envInt("MONETIZEI_MAX_REWARDS_PER_INSTALLATION_DAY", 10, 0, 10_000)
+    )
+    val rewardService = RewardService(persistence = persistence, policy = rewardPolicy)
+    val service = SessionIngestService(persistence = persistence, rewardService = rewardService)
     val server = MonetizeiHttpServer(InetSocketAddress("0.0.0.0", port), service)
 
     Runtime.getRuntime().addShutdownHook(
@@ -99,5 +112,14 @@ fun main() {
         }
     )
     server.start()
-    println("Monetizei backend listening on 0.0.0.0:$port with persistent storage")
+    println(
+        "Monetizei backend listening on 0.0.0.0:$port with persistent storage; " +
+            "rewardPolicyEnabled=${rewardPolicy.enabled}"
+    )
 }
+
+private fun envLong(name: String, default: Long, min: Long, max: Long): Long =
+    System.getenv(name)?.toLongOrNull()?.coerceIn(min, max) ?: default
+
+private fun envInt(name: String, default: Int, min: Int, max: Int): Int =
+    System.getenv(name)?.toIntOrNull()?.coerceIn(min, max) ?: default
