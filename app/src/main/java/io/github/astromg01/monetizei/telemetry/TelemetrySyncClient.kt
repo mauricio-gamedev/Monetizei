@@ -47,8 +47,8 @@ class TelemetrySyncClient(
         val walletResponse = runCatching {
             get("/v1/wallet?installationId=$encodedInstallationId")
         }.getOrNull()
-        if (walletResponse?.code in 200..299) {
-            latestWallet = RewardWalletResponseParser.parse(walletResponse?.body.orEmpty()) ?: latestWallet
+        if (walletResponse != null && walletResponse.code in 200..299) {
+            latestWallet = RewardWalletResponseParser.parse(walletResponse.body) ?: latestWallet
         }
 
         return SyncReport(uploaded = uploaded, pending = outbox.pendingCount(), wallet = latestWallet)
