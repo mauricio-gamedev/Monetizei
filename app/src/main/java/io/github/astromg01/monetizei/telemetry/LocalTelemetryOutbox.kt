@@ -2,26 +2,26 @@ package io.github.astromg01.monetizei.telemetry
 
 import android.content.Context
 import io.github.astromg01.monetizei.protocol.InstallationRegistration
+import io.github.astromg01.monetizei.protocol.ProtocolJson
 import io.github.astromg01.monetizei.protocol.SignedSessionEnvelope
-import org.json.JSONObject
 
 class LocalTelemetryOutbox(context: Context) {
     private val preferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     @Synchronized
     fun saveRegistration(registration: InstallationRegistration) {
-        check(
-            preferences.edit()
-                .putString(KEY_REGISTRATION, encodeRegistration(registration))
-                .commit()
-        ) { "Unable to persist installation registration" }
+        check(preferences.edit().putString(KEY_REGISTRATION, ProtocolJson.encodeRegistration(registration)).commit())
     }
 
     @Synchronized
+    fun registration(): InstallationRegistration? =
+        preferences.getString(KEY_REGISTRATION, null)?.let { encoded ->
+            runCatching { ProtocolJson.decodeRegistration(encoded) }.getOrNull()
+        }
+
+    @Synchronized
     fun enqueue(envelope: SignedSessionEnvelope) {
-        val index = preferences.getStringSet(KEY_PENDING_INDEX, emptySet())
-            ?.toMutableSet()
-            ?: mutableSetOf()
+        val index = preferences.getStringSet(KEY_PENDING_INDEX, emptySet())?.toMutableSet() ?: mutableSetOf()
         val sequence = envelope.payload.sequence.toString()
         val editor = preferences.edit()
 
@@ -35,47 +35,38 @@ class LocalTelemetryOutbox(context: Context) {
 
         index.add(sequence)
         check(
-            editor
-                .putString(KEY_SESSION_PREFIX + sequence, encodeEnvelope(envelope))
+            editor.putString(KEY_SESSION_PREFIX + sequence, ProtocolJson.encodeSession(envelope))
                 .putStringSet(KEY_PENDING_INDEX, index)
                 .commit()
-        ) { "Unable to persist signed session" }
+        )
     }
 
     @Synchronized
-    fun pendingCount(): Int =
-        preferences.getStringSet(KEY_PENDING_INDEX, emptySet())?.size ?: 0
+    fun pending(limit: Int = 10): List<SignedSessionEnvelope> =
+        preferences.getStringSet(KEY_PENDING_INDEX, emptySet()).orEmpty()
+            .mapNotNull(String::toLongOrNull)
+            .sorted()
+            .take(limit.coerceIn(1, MAX_PENDING))
+            .mapNotNull { sequence ->
+                preferences.getString(KEY_SESSION_PREFIX + sequence, null)?.let { encoded ->
+                    runCatching { ProtocolJson.decodeSession(encoded) }.getOrNull()
+                }
+            }
 
-    private fun encodeRegistration(registration: InstallationRegistration): String =
-        JSONObject()
-            .put("protocolVersion", registration.protocolVersion)
-            .put("installationId", registration.installationId)
-            .put("keyId", registration.keyId)
-            .put("publicKeyBase64", registration.publicKeyBase64)
-            .put("signatureAlgorithm", registration.signatureAlgorithm)
-            .put("appVersion", registration.appVersion)
-            .put("createdAtEpochMs", registration.createdAtEpochMs)
-            .toString()
+    @Synchronized
+    fun remove(sequence: Long) {
+        val index = preferences.getStringSet(KEY_PENDING_INDEX, emptySet())?.toMutableSet() ?: mutableSetOf()
+        index.remove(sequence.toString())
+        check(
+            preferences.edit()
+                .remove(KEY_SESSION_PREFIX + sequence)
+                .putStringSet(KEY_PENDING_INDEX, index)
+                .commit()
+        )
+    }
 
-    private fun encodeEnvelope(envelope: SignedSessionEnvelope): String =
-        JSONObject()
-            .put(
-                "payload",
-                JSONObject()
-                    .put("protocolVersion", envelope.payload.protocolVersion)
-                    .put("installationId", envelope.payload.installationId)
-                    .put("sessionId", envelope.payload.sessionId)
-                    .put("sequence", envelope.payload.sequence)
-                    .put("startedAtEpochMs", envelope.payload.startedAtEpochMs)
-                    .put("finishedAtEpochMs", envelope.payload.finishedAtEpochMs)
-                    .put("durationMs", envelope.payload.durationMs)
-                    .put("score", envelope.payload.score)
-                    .put("appVersion", envelope.payload.appVersion)
-            )
-            .put("keyId", envelope.keyId)
-            .put("signatureAlgorithm", envelope.signatureAlgorithm)
-            .put("signatureBase64", envelope.signatureBase64)
-            .toString()
+    @Synchronized
+    fun pendingCount(): Int = preferences.getStringSet(KEY_PENDING_INDEX, emptySet())?.size ?: 0
 
     private companion object {
         const val PREFS_NAME = "monetizei_telemetry_outbox"
