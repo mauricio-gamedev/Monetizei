@@ -79,43 +79,71 @@ data class RemoteRewardWallet(
     val brl: RemoteCurrencyRewardBalance = RemoteCurrencyRewardBalance(),
     val usd: RemoteCurrencyRewardBalance = RemoteCurrencyRewardBalance()
 ) {
-    // Compatibility helpers for code that still treats the wallet as BRL-only.
     val pendingCents: Long get() = brl.pendingCents
     val approvedCents: Long get() = brl.approvedCents
     val availableCents: Long get() = brl.availableCents
 }
 
 object RewardWalletResponseParser {
-    private val pending = Regex("\"pendingCents\"\\s*:\\s*(\\d+)")
-    private val approved = Regex("\"approvedCents\"\\s*:\\s*(\\d+)")
-    private val available = Regex("\"availableCents\"\\s*:\\s*(\\d+)")
-
     fun parse(body: String): RemoteRewardWallet? {
-        val brl = parseCurrency(body, "BRL")
-        val usd = parseCurrency(body, "USD")
+        val brlObject = extractObject(body, "BRL")
+        val usdObject = extractObject(body, "USD")
+        val brl = brlObject?.let(::parseBalance)
+        val usd = usdObject?.let(::parseBalance)
         if (brl != null && usd != null) {
             return RemoteRewardWallet(brl = brl, usd = usd)
         }
 
-        // v0.5 backend fallback: top-level wallet fields represented BRL only.
         val legacyBrl = parseBalance(body) ?: return null
         return RemoteRewardWallet(brl = legacyBrl)
     }
 
-    private fun parseCurrency(body: String, code: String): RemoteCurrencyRewardBalance? {
-        val objectMatch = Regex("\"$code\"\\s*:\\s*\\{([^{}]*)}")
-            .find(body)
-            ?.groupValues
-            ?.get(1)
-            ?: return null
-        return parseBalance(objectMatch)
+    private fun extractObject(body: String, key: String): String? {
+        val marker = "\"$key\""
+        val keyIndex = body.indexOf(marker)
+        if (keyIndex < 0) return null
+
+        val colonIndex = body.indexOf(':', keyIndex + marker.length)
+        if (colonIndex < 0) return null
+
+        val openIndex = body.indexOf('{', colonIndex + 1)
+        if (openIndex < 0) return null
+
+        var depth = 0
+        for (index in openIndex until body.length) {
+            when (body[index]) {
+                '{' -> depth += 1
+                '}' -> {
+                    depth -= 1
+                    if (depth == 0) return body.substring(openIndex + 1, index)
+                }
+            }
+        }
+        return null
     }
 
     private fun parseBalance(body: String): RemoteCurrencyRewardBalance? {
-        val pendingCents = pending.find(body)?.groupValues?.get(1)?.toLongOrNull() ?: return null
-        val approvedCents = approved.find(body)?.groupValues?.get(1)?.toLongOrNull() ?: return null
-        val availableCents = available.find(body)?.groupValues?.get(1)?.toLongOrNull() ?: return null
+        val pendingCents = extractLong(body, "pendingCents") ?: return null
+        val approvedCents = extractLong(body, "approvedCents") ?: return null
+        val availableCents = extractLong(body, "availableCents") ?: return null
         return RemoteCurrencyRewardBalance(pendingCents, approvedCents, availableCents)
+    }
+
+    private fun extractLong(body: String, key: String): Long? {
+        val marker = "\"$key\""
+        val keyIndex = body.indexOf(marker)
+        if (keyIndex < 0) return null
+
+        val colonIndex = body.indexOf(':', keyIndex + marker.length)
+        if (colonIndex < 0) return null
+
+        var start = colonIndex + 1
+        while (start < body.length && body[start].isWhitespace()) start += 1
+        if (start >= body.length || !body[start].isDigit()) return null
+
+        var end = start
+        while (end < body.length && body[end].isDigit()) end += 1
+        return body.substring(start, end).toLongOrNull()
     }
 }
 
