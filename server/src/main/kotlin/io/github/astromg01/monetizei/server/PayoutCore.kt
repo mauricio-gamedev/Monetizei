@@ -1,6 +1,7 @@
 package io.github.astromg01.monetizei.server
 
 import io.github.astromg01.monetizei.protocol.CanonicalWithdrawalCodec
+import io.github.astromg01.monetizei.protocol.InstallationRegistration
 import io.github.astromg01.monetizei.protocol.SessionProtocol
 import io.github.astromg01.monetizei.protocol.SignedWithdrawalEnvelope
 import io.github.astromg01.monetizei.protocol.WithdrawalProtocol
@@ -9,7 +10,6 @@ import java.security.Signature
 import java.security.spec.X509EncodedKeySpec
 import java.util.Base64
 import java.util.UUID
-
 
 enum class PayoutState {
     REQUESTED,
@@ -96,7 +96,8 @@ enum class ProviderPayoutState {
 data class ProviderSubmitResult(
     val accepted: Boolean,
     val providerBatchId: String? = null,
-    val failureCode: String? = null
+    val failureCode: String? = null,
+    val retryable: Boolean = false
 )
 
 data class ProviderStatusResult(
@@ -147,7 +148,7 @@ data class WithdrawalResult(
 class WithdrawalService(
     private val rewardService: RewardService,
     private val persistence: PayoutPersistence = NoopPayoutPersistence,
-    private val registrationLookup: (String) -> io.github.astromg01.monetizei.protocol.InstallationRegistration?,
+    private val registrationLookup: (String) -> InstallationRegistration?,
     private val gateway: PayoutGateway = DisabledPayoutGateway
 ) {
     @Synchronized
@@ -252,6 +253,18 @@ class WithdrawalService(
     private fun submit(entry: PayoutLedgerEntry, nowEpochMs: Long): WithdrawalResult {
         val provider = gateway.submit(entry.requestId, entry.currency, entry.amountCents)
         if (!provider.accepted || provider.providerBatchId.isNullOrBlank()) {
+            if (provider.retryable) {
+                return result(
+                    WithdrawalResultCode.PROCESSING,
+                    entry.installationId,
+                    entry.currency,
+                    entry.requestId,
+                    entry.amountCents,
+                    provider.providerBatchId,
+                    provider.failureCode
+                )
+            }
+
             releaseRewards(entry.requestId, nowEpochMs)
             persistence.updatePayout(
                 entry.requestId,
@@ -297,70 +310,81 @@ class WithdrawalService(
     private fun refresh(entry: PayoutLedgerEntry, nowEpochMs: Long): WithdrawalResult {
         val providerBatchId = entry.providerBatchId
             ?: return result(WithdrawalResultCode.STORAGE_FAILURE, entry.installationId, entry.currency)
-        return when (val provider = gateway.status(providerBatchId)) {
-            is ProviderStatusResult -> when (provider.state) {
-                ProviderPayoutState.PENDING -> result(
-                    WithdrawalResultCode.PROCESSING,
-                    entry.installationId,
-                    entry.currency,
-                    entry.requestId,
-                    entry.amountCents,
-                    providerBatchId
-                )
-                ProviderPayoutState.SUCCESS -> {
-                    if (!markRewardsPaid(entry.requestId, nowEpochMs) ||
-                        !persistence.updatePayout(
-                            entry.requestId,
-                            PayoutState.SUBMITTED,
-                            PayoutState.PAID,
-                            providerBatchId,
-                            null,
-                            nowEpochMs
-                        )
-                    ) {
-                        result(WithdrawalResultCode.STORAGE_FAILURE, entry.installationId, entry.currency)
-                    } else {
-                        result(
-                            WithdrawalResultCode.PAID,
-                            entry.installationId,
-                            entry.currency,
-                            entry.requestId,
-                            entry.amountCents,
-                            providerBatchId
-                        )
-                    }
-                }
-                ProviderPayoutState.FAILED -> {
-                    releaseRewards(entry.requestId, nowEpochMs)
-                    persistence.updatePayout(
+        val provider = gateway.status(providerBatchId)
+        return when (provider.state) {
+            ProviderPayoutState.PENDING -> result(
+                WithdrawalResultCode.PROCESSING,
+                entry.installationId,
+                entry.currency,
+                entry.requestId,
+                entry.amountCents,
+                providerBatchId,
+                provider.failureCode
+            )
+            ProviderPayoutState.SUCCESS -> {
+                if (!markRewardsPaid(entry.requestId, nowEpochMs) ||
+                    !persistence.updatePayout(
                         entry.requestId,
                         PayoutState.SUBMITTED,
-                        PayoutState.FAILED,
+                        PayoutState.PAID,
                         providerBatchId,
-                        provider.failureCode ?: "PAYOUT_FAILED",
+                        null,
                         nowEpochMs
                     )
+                ) {
+                    result(WithdrawalResultCode.STORAGE_FAILURE, entry.installationId, entry.currency)
+                } else {
                     result(
-                        WithdrawalResultCode.FAILED,
+                        WithdrawalResultCode.PAID,
                         entry.installationId,
                         entry.currency,
                         entry.requestId,
                         entry.amountCents,
-                        providerBatchId,
-                        provider.failureCode
+                        providerBatchId
                     )
                 }
+            }
+            ProviderPayoutState.FAILED -> {
+                releaseRewards(entry.requestId, nowEpochMs)
+                persistence.updatePayout(
+                    entry.requestId,
+                    PayoutState.SUBMITTED,
+                    PayoutState.FAILED,
+                    providerBatchId,
+                    provider.failureCode ?: "PAYOUT_FAILED",
+                    nowEpochMs
+                )
+                result(
+                    WithdrawalResultCode.FAILED,
+                    entry.installationId,
+                    entry.currency,
+                    entry.requestId,
+                    entry.amountCents,
+                    providerBatchId,
+                    provider.failureCode
+                )
             }
         }
     }
 
     private fun markRewardsPaid(requestId: String, nowEpochMs: Long): Boolean {
         val ids = persistence.loadPayoutRewardIds(requestId)
-        return ids.isNotEmpty() && ids.all { rewardService.markPaid(it, nowEpochMs) }
+        if (ids.isEmpty()) return false
+        return ids.all { rewardId ->
+            when (rewardService.snapshot().firstOrNull { it.rewardId == rewardId }?.state) {
+                RewardState.PAID -> true
+                RewardState.PAYOUT_PENDING -> rewardService.markPaid(rewardId, nowEpochMs)
+                else -> false
+            }
+        }
     }
 
     private fun releaseRewards(requestId: String, nowEpochMs: Long) {
-        persistence.loadPayoutRewardIds(requestId).forEach { rewardService.releasePayout(it, nowEpochMs) }
+        persistence.loadPayoutRewardIds(requestId).forEach { rewardId ->
+            if (rewardService.snapshot().firstOrNull { it.rewardId == rewardId }?.state == RewardState.PAYOUT_PENDING) {
+                rewardService.releasePayout(rewardId, nowEpochMs)
+            }
+        }
     }
 
     private fun result(
