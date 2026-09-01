@@ -14,7 +14,6 @@ import java.security.spec.ECGenParameterSpec
 import java.util.Base64
 import java.util.UUID
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PayoutCoreTest {
@@ -49,7 +48,7 @@ class PayoutCoreTest {
     @Test
     fun sandboxSuccessRestoresAvailableBalanceAndNeverMarksRealRewardPaid() {
         val fixture = fixture()
-        val gateway = FakeGateway(PayoutSettlementMode.SANDBOX)
+        val gateway = FakeGateway(settlementMode = PayoutSettlementMode.SANDBOX)
         val persistence = FakePayoutPersistence()
         val service = WithdrawalService(
             rewardService = fixture.rewardService,
@@ -82,7 +81,7 @@ class PayoutCoreTest {
     }
 
     @Test
-    fun retryableSubmitKeepsSameRequestReservedAndDoesNotReleaseBalance() {
+    fun repeatSubmitGatewayCanRetrySameIdempotentProviderRequest() {
         val fixture = fixture()
         val gateway = FakeGateway().apply {
             submitResults += ProviderSubmitResult(
@@ -114,6 +113,51 @@ class PayoutCoreTest {
     }
 
     @Test
+    fun reconcileOnlyGatewayNeverRepeatsAmbiguousRealTransfer() {
+        val fixture = fixture()
+        val gateway = FakeGateway(retryStrategy = PayoutRetryStrategy.RECONCILE_ONLY).apply {
+            submitResults += ProviderSubmitResult(
+                accepted = false,
+                failureCode = "ASAAS_AMBIGUOUS_NETWORK",
+                retryable = true
+            )
+            reconcileResults += ProviderSubmitResult(
+                accepted = false,
+                failureCode = "ASAAS_RECONCILING",
+                retryable = true
+            )
+            reconcileResults += ProviderSubmitResult(true, providerBatchId = "asaas-transfer-1")
+        }
+        val persistence = FakePayoutPersistence()
+        val service = WithdrawalService(
+            rewardService = fixture.rewardService,
+            persistence = persistence,
+            registrationLookup = { fixture.registration },
+            gateway = gateway
+        )
+        val requestId = UUID.randomUUID().toString()
+        val envelope = signedEnvelope(fixture, requestId, NOW)
+
+        val ambiguous = service.request(envelope, NOW)
+        assertEquals(WithdrawalResultCode.PROCESSING, ambiguous.code)
+        assertEquals(1, gateway.submitCount)
+        assertEquals("ASAAS_AMBIGUOUS_NETWORK", persistence.loadPayout(requestId)?.failureCode)
+        assertEquals(RewardState.PAYOUT_PENDING, fixture.rewardService.snapshot().single().state)
+
+        val stillReconciling = service.request(envelope, NOW + 1_000L)
+        assertEquals(WithdrawalResultCode.PROCESSING, stillReconciling.code)
+        assertEquals(1, gateway.submitCount)
+        assertEquals(1, gateway.reconcileCount)
+        assertEquals(RewardState.PAYOUT_PENDING, fixture.rewardService.snapshot().single().state)
+
+        val recovered = service.request(envelope, NOW + 2_000L)
+        assertEquals(WithdrawalResultCode.SUBMITTED, recovered.code)
+        assertEquals(1, gateway.submitCount)
+        assertEquals(2, gateway.reconcileCount)
+        assertEquals("asaas-transfer-1", persistence.loadPayout(requestId)?.providerBatchId)
+    }
+
+    @Test
     fun disabledProviderLeavesAvailableBalanceUntouched() {
         val fixture = fixture()
         val service = WithdrawalService(
@@ -142,7 +186,7 @@ class PayoutCoreTest {
             keyId = KeyIds.fromEncodedPublicKey(keyPair.public.encoded),
             publicKeyBase64 = publicBase64,
             signatureAlgorithm = SessionProtocol.SIGNATURE_ALGORITHM,
-            appVersion = "0.6.1",
+            appVersion = "0.7.0",
             createdAtEpochMs = NOW - 10_000L
         )
         val reward = RewardLedgerEntry(
@@ -171,7 +215,7 @@ class PayoutCoreTest {
             requestId = requestId,
             currency = "BRL",
             requestedAtEpochMs = requestedAt,
-            appVersion = "0.6.1"
+            appVersion = "0.7.0"
         )
         val signature = Signature.getInstance(SessionProtocol.SIGNATURE_ALGORITHM).apply {
             initSign(fixture.keyPair.private)
@@ -192,13 +236,16 @@ class PayoutCoreTest {
     )
 
     private class FakeGateway(
-        override val settlementMode: PayoutSettlementMode = PayoutSettlementMode.LIVE
+        override val settlementMode: PayoutSettlementMode = PayoutSettlementMode.LIVE,
+        override val retryStrategy: PayoutRetryStrategy = PayoutRetryStrategy.REPEAT_SUBMIT
     ) : PayoutGateway {
-        override val providerName = "paypal"
+        override val providerName = "fake"
         override val enabled = true
         var submitCount = 0
+        var reconcileCount = 0
         var statusResult = ProviderStatusResult(ProviderPayoutState.PENDING)
         val submitResults = ArrayDeque<ProviderSubmitResult>()
+        val reconcileResults = ArrayDeque<ProviderSubmitResult>()
 
         override fun submit(requestId: String, currency: RewardCurrency, amountCents: Long): ProviderSubmitResult {
             submitCount += 1
@@ -207,6 +254,11 @@ class PayoutCoreTest {
             } else {
                 submitResults.removeFirst()
             }
+        }
+
+        override fun reconcile(requestId: String, currency: RewardCurrency, amountCents: Long): ProviderSubmitResult? {
+            reconcileCount += 1
+            return if (reconcileResults.isEmpty()) null else reconcileResults.removeFirst()
         }
 
         override fun status(providerBatchId: String): ProviderStatusResult = statusResult

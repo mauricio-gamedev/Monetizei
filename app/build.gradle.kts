@@ -21,8 +21,8 @@ android {
         applicationId = "io.github.astromg01.monetizei"
         minSdk = 26
         targetSdk = 37
-        versionCode = 12
-        versionName = "0.6.1"
+        versionCode = 13
+        versionName = "0.7.0"
         buildConfigField(
             "String",
             "MONETIZEI_API_BASE_URL",

@@ -302,22 +302,29 @@ fun main() {
     val service = SessionIngestService(persistence = persistence, rewardService = rewardService)
     val adminToken = System.getenv("MONETIZEI_ADMIN_TOKEN")?.trim()?.takeIf { it.isNotBlank() }
 
-    val payoutsExplicitlyEnabled = envBoolean("MONETIZEI_PAYPAL_PAYOUTS_ENABLED", false)
+    val asaasExplicitlyEnabled = envBoolean("MONETIZEI_ASAAS_PIX_PAYOUTS_ENABLED", false)
+    val paypalExplicitlyEnabled = envBoolean("MONETIZEI_PAYPAL_PAYOUTS_ENABLED", false)
     val paypalSandbox = System.getenv("MONETIZEI_PAYPAL_MODE")
         ?.trim()
         ?.lowercase()
         ?.let { it != "live" }
         ?: true
-    val payoutGateway: PayoutGateway = if (payoutsExplicitlyEnabled) {
-        PayPalPayoutGateway(
+
+    val payoutGateway: PayoutGateway = when {
+        asaasExplicitlyEnabled -> AsaasPixPayoutGateway(
+            apiKey = System.getenv("MONETIZEI_ASAAS_API_KEY").orEmpty(),
+            pixKey = System.getenv("MONETIZEI_ASAAS_PIX_KEY").orEmpty(),
+            pixKeyType = System.getenv("MONETIZEI_ASAAS_PIX_KEY_TYPE").orEmpty()
+        )
+        paypalExplicitlyEnabled -> PayPalPayoutGateway(
             clientId = System.getenv("MONETIZEI_PAYPAL_CLIENT_ID").orEmpty(),
             clientSecret = System.getenv("MONETIZEI_PAYPAL_CLIENT_SECRET").orEmpty(),
             receiverEmail = System.getenv("MONETIZEI_PAYPAL_RECEIVER_EMAIL").orEmpty(),
             sandbox = paypalSandbox
         )
-    } else {
-        DisabledPayoutGateway
+        else -> DisabledPayoutGateway
     }
+
     val withdrawalService = WithdrawalService(
         rewardService = rewardService,
         persistence = persistence,
@@ -346,7 +353,8 @@ fun main() {
         "Monetizei backend listening on 0.0.0.0:$port with persistent storage; " +
             "rewardPolicyEnabled=${rewardPolicy.enabled}; rewardCurrency=${rewardPolicy.currency}; " +
             "adminApprovalEnabled=${adminToken != null}; payoutsEnabled=${payoutGateway.enabled}; " +
-            "paypalMode=${if (paypalSandbox) "sandbox" else "live"}"
+            "payoutProvider=${payoutGateway.providerName}; " +
+            "settlementMode=${payoutGateway.settlementMode}"
     )
 }
 

@@ -187,7 +187,7 @@ class GameSurfaceView(
         if (canWithdraw && recorder != null) {
             payoutButtonRect.set(48f, center + 220f, width - 48f, center + 310f)
             canvas.drawRoundRect(payoutButtonRect, 22f, 22f, payoutButtonPaint)
-            val label = if (recorder.hasPendingWithdrawal()) "Atualizar saque PayPal" else "Sacar BRL via PayPal"
+            val label = if (recorder.hasPendingWithdrawal()) "Atualizar saque Pix" else "Sacar BRL via Pix"
             canvas.drawText(label, payoutButtonRect.left + 28f, payoutButtonRect.centerY() + 10f, payoutButtonTextPaint)
         } else {
             payoutButtonRect.setEmpty()
@@ -215,15 +215,15 @@ class GameSurfaceView(
         val recorder = telemetryRecorder ?: return null
         return when (val status = recorder.withdrawalStatus()) {
             "idle" -> null
-            "requesting" -> "Saque: enviando pedido..."
-            "processing" -> "Saque: processando no PayPal"
+            "requesting" -> "Saque Pix: enviando pedido..."
+            "processing" -> "Saque Pix: processando"
             "sandbox_verified" -> "Sandbox PayPal validado ✓ • saldo preservado"
-            "paid" -> "Saque: pago pelo PayPal ✓"
+            "paid" -> "Saque Pix: enviado ✓"
             "no_available" -> "Saque: sem saldo disponível"
-            "provider_disabled" -> "Saque: PayPal ainda não configurado"
-            "network_error" -> "Saque: falha de rede; toque para tentar de novo"
+            "provider_disabled" -> "Saque Pix ainda não configurado"
+            "network_error" -> "Saque Pix: falha de rede; toque para atualizar"
             else -> if (status.startsWith("failed_")) {
-                "Saque: falhou (${status.removePrefix("failed_")})"
+                "Saque Pix: falhou (${status.removePrefix("failed_")})"
             } else {
                 "Saque: $status"
             }
