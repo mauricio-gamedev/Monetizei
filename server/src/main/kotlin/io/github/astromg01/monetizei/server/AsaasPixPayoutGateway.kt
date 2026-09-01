@@ -177,14 +177,15 @@ class AsaasPixPayoutGateway(
         val days = listOf(today, today.minusDays(1))
         for (day in days) {
             var offset = 0
-            repeat(MAX_RECONCILIATION_PAGES) {
+            var page = 0
+            while (page < MAX_RECONCILIATION_PAGES) {
                 val path = "/transfers?dateCreated%5Bge%5D=$day&dateCreated%5Ble%5D=$day&limit=$PAGE_SIZE&offset=$offset"
-                val response = request("GET", path) ?: return@repeat
-                if (response.code !in 200..299) return@repeat
+                val response = request("GET", path) ?: break
+                if (response.code !in 200..299) break
                 findTransferIdByExternalReference(response.body, requestId)?.let { return it }
-                val hasMore = extractBoolean(response.body, "hasMore") ?: false
-                if (!hasMore) return@repeat
+                if (extractBoolean(response.body, "hasMore") != true) break
                 offset += PAGE_SIZE
+                page += 1
             }
         }
         return null
