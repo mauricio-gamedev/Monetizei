@@ -99,6 +99,11 @@ enum class PayoutSettlementMode {
     LIVE
 }
 
+enum class PayoutRetryStrategy {
+    REPEAT_SUBMIT,
+    RECONCILE_ONLY
+}
+
 data class ProviderSubmitResult(
     val accepted: Boolean,
     val providerBatchId: String? = null,
@@ -116,12 +121,17 @@ interface PayoutGateway {
     val enabled: Boolean
     val settlementMode: PayoutSettlementMode
         get() = PayoutSettlementMode.LIVE
+    val retryStrategy: PayoutRetryStrategy
+        get() = PayoutRetryStrategy.REPEAT_SUBMIT
+
     fun submit(requestId: String, currency: RewardCurrency, amountCents: Long): ProviderSubmitResult
     fun status(providerBatchId: String): ProviderStatusResult
+
+    fun reconcile(requestId: String, currency: RewardCurrency, amountCents: Long): ProviderSubmitResult? = null
 }
 
 object DisabledPayoutGateway : PayoutGateway {
-    override val providerName: String = "paypal"
+    override val providerName: String = "disabled"
     override val enabled: Boolean = false
     override val settlementMode: PayoutSettlementMode = PayoutSettlementMode.DISABLED
     override fun submit(requestId: String, currency: RewardCurrency, amountCents: Long) =
@@ -238,7 +248,13 @@ class WithdrawalService(
     }
 
     private fun continueExisting(entry: PayoutLedgerEntry, nowEpochMs: Long): WithdrawalResult = when (entry.state) {
-        PayoutState.REQUESTED -> submit(entry, nowEpochMs)
+        PayoutState.REQUESTED -> {
+            if (gateway.retryStrategy == PayoutRetryStrategy.RECONCILE_ONLY && !entry.failureCode.isNullOrBlank()) {
+                reconcileExisting(entry, nowEpochMs)
+            } else {
+                submit(entry, nowEpochMs)
+            }
+        }
         PayoutState.SUBMITTED -> refresh(entry, nowEpochMs)
         PayoutState.PAID -> result(
             WithdrawalResultCode.PAID,
@@ -263,6 +279,14 @@ class WithdrawalService(
         val provider = gateway.submit(entry.requestId, entry.currency, entry.amountCents)
         if (!provider.accepted || provider.providerBatchId.isNullOrBlank()) {
             if (provider.retryable) {
+                persistence.updatePayout(
+                    entry.requestId,
+                    PayoutState.REQUESTED,
+                    PayoutState.REQUESTED,
+                    provider.providerBatchId,
+                    provider.failureCode ?: "PAYOUT_RETRYABLE",
+                    nowEpochMs
+                )
                 return result(
                     WithdrawalResultCode.PROCESSING,
                     entry.installationId,
@@ -294,11 +318,41 @@ class WithdrawalService(
             )
         }
 
+        return markSubmitted(entry, provider.providerBatchId, nowEpochMs)
+    }
+
+    private fun reconcileExisting(entry: PayoutLedgerEntry, nowEpochMs: Long): WithdrawalResult {
+        val recovered = gateway.reconcile(entry.requestId, entry.currency, entry.amountCents)
+        val batchId = recovered?.providerBatchId
+        if (recovered?.accepted == true && !batchId.isNullOrBlank()) {
+            return markSubmitted(entry, batchId, nowEpochMs)
+        }
+
+        persistence.updatePayout(
+            entry.requestId,
+            PayoutState.REQUESTED,
+            PayoutState.REQUESTED,
+            batchId,
+            recovered?.failureCode ?: entry.failureCode ?: "PAYOUT_RECONCILING",
+            nowEpochMs
+        )
+        return result(
+            WithdrawalResultCode.PROCESSING,
+            entry.installationId,
+            entry.currency,
+            entry.requestId,
+            entry.amountCents,
+            batchId,
+            recovered?.failureCode ?: entry.failureCode
+        )
+    }
+
+    private fun markSubmitted(entry: PayoutLedgerEntry, providerBatchId: String, nowEpochMs: Long): WithdrawalResult {
         if (!persistence.updatePayout(
                 entry.requestId,
                 PayoutState.REQUESTED,
                 PayoutState.SUBMITTED,
-                provider.providerBatchId,
+                providerBatchId,
                 null,
                 nowEpochMs
             )
@@ -312,7 +366,7 @@ class WithdrawalService(
             entry.currency,
             entry.requestId,
             entry.amountCents,
-            provider.providerBatchId
+            providerBatchId
         )
     }
 
