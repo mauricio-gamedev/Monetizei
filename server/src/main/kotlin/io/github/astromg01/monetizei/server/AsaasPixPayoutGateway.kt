@@ -7,13 +7,13 @@ import java.nio.charset.StandardCharsets
 import java.time.LocalDate
 import java.time.ZoneOffset
 
-internal data class AsaasHttpResponse(val code: Int, val body: String)
+data class AsaasHttpResponse(val code: Int, val body: String)
 
-internal interface AsaasHttpClient {
+interface AsaasHttpClient {
     fun request(method: String, url: String, headers: Map<String, String>, body: String? = null): AsaasHttpResponse?
 }
 
-internal class UrlConnectionAsaasHttpClient(
+class UrlConnectionAsaasHttpClient(
     private val connectTimeoutMs: Int = 7_000,
     private val readTimeoutMs: Int = 10_000
 ) : AsaasHttpClient {
